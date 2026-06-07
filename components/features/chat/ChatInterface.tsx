@@ -15,6 +15,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useConversations } from '@/hooks/useConversations';
 import { useFollowUp } from '@/hooks/useFollowUp';
+import { usePushNotifications } from '@/hooks/usePushNotifications';
 import { cn } from '@/lib/utils';
 import { ANIMATION_DURATION } from '@/constants';
 import type { Message } from '@/types/conversation';
@@ -74,7 +75,8 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
   const [input, setInput] = useState('');
 
   const [state, dispatch] = useReducer(reducer, {
-    sidebarOpen: true,
+    // Open by default on desktop (lg: 1024px+), closed on mobile
+    sidebarOpen: typeof window !== 'undefined' ? window.innerWidth >= 1024 : true,
     deleteTargetId: null,
     lastUserMessage: '',
     showFollowUps: false,
@@ -82,6 +84,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
 
   const { conversations, mutate: mutateConversations } = useConversations();
   const { questions: followUpQuestions, fetchFollowUps, clearFollowUps, loadStoredFollowUps } = useFollowUp();
+  const { permission, requestPermission, notify } = usePushNotifications();
 
   const uiInitialMessages = useMemo(
     () => dbMessagesToUIMessages(initialMessages),
@@ -102,6 +105,9 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
       dispatch({ type: 'SHOW_FOLLOW_UPS' });
       fetchFollowUps(state.lastUserMessage, text, sessionId);
       mutateConversations();
+      // Push notification when user is in another tab
+      const preview = text.slice(0, 100) + (text.length > 100 ? '...' : '');
+      notify('Spur Support replied', preview, `/${sessionId}`);
     },
   });
 
@@ -119,7 +125,6 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // On session restore, if the last AI message has stored follow-ups, show them immediately.
   useEffect(() => {
     if (initialMessages.length === 0) return;
     const lastMsg = initialMessages[initialMessages.length - 1];
@@ -184,7 +189,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
   const isEmpty = messages.length === 0;
 
   return (
-    <div className="flex h-screen bg-neutral-950 text-white overflow-hidden">
+    <div className="flex h-svh bg-[#080c14] text-white overflow-hidden">
       <SessionSidebar
         isOpen={state.sidebarOpen}
         conversations={conversations}
@@ -195,6 +200,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
         onClose={() => dispatch({ type: 'CLOSE_SIDEBAR' })}
       />
 
+      {/* Backdrop - mobile only */}
       <AnimatePresence>
         {state.sidebarOpen && (
           <motion.div
@@ -202,44 +208,101 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: ANIMATION_DURATION }}
-            className="fixed inset-0 z-20 bg-black/50 lg:hidden"
+            className="fixed inset-0 z-20 lg:hidden"
+            style={{ background: 'rgba(4, 6, 12, 0.75)', backdropFilter: 'blur(2px)' }}
             onClick={() => dispatch({ type: 'CLOSE_SIDEBAR' })}
           />
         )}
       </AnimatePresence>
 
       <div className="flex flex-1 flex-col min-w-0">
-        <header className="flex items-center gap-3 border-b border-white/5 px-4 py-3">
+        {/* Header */}
+        <header className="flex items-center gap-3 border-b border-white/5 px-4 pt-safe" style={{ paddingBottom: '12px', paddingTop: 'max(12px, var(--safe-top))' }}>
           <button
             onClick={() => dispatch({ type: 'TOGGLE_SIDEBAR' })}
-            className="flex-shrink-0 p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-white/5 transition-colors"
+            className="h-10 w-10 flex-shrink-0 flex items-center justify-center rounded-xl text-neutral-400 hover:text-white hover:bg-white/6 transition-colors active:scale-95"
+            aria-label="Toggle sidebar"
           >
             <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
             </svg>
           </button>
-          <div className="flex items-center gap-2">
-            <div className="h-6 w-6 rounded-md bg-sky-600 flex items-center justify-center">
-              <span className="text-xs font-bold text-white">S</span>
+
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="h-7 w-7 flex-shrink-0 rounded-lg bg-gradient-to-br from-sky-500 to-indigo-600 flex items-center justify-center">
+              <svg className="h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+              </svg>
             </div>
-            <span className="text-sm font-medium text-white">Spur Support</span>
+            <div className="min-w-0">
+              <span className="text-sm font-semibold text-white tracking-tight">Spur Support</span>
+            </div>
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            <div className={cn('h-2 w-2 rounded-full flex-shrink-0', isLoading ? 'bg-yellow-500 animate-pulse' : 'bg-green-500')} />
+
+          <div className="ml-auto flex items-center gap-1">
+            {/* Status indicator */}
+            <div className="flex items-center gap-1.5 px-2">
+              <div className={cn(
+                'h-1.5 w-1.5 rounded-full flex-shrink-0',
+                isLoading ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'
+              )} />
+              <span className="text-xs text-neutral-500 hidden sm:block">
+                {isLoading ? 'Replying' : 'Online'}
+              </span>
+            </div>
+
+            {/* Notification bell */}
+            {permission !== 'unsupported' && (
+              <button
+                onClick={async () => {
+                  if (permission === 'default') await requestPermission();
+                }}
+                disabled={permission === 'denied'}
+                title={
+                  permission === 'granted'
+                    ? 'Notifications enabled'
+                    : permission === 'denied'
+                    ? 'Notifications blocked - check browser settings'
+                    : 'Enable notifications'
+                }
+                className={cn(
+                  'h-10 w-10 flex items-center justify-center rounded-xl transition-colors',
+                  permission === 'granted'
+                    ? 'text-sky-400 hover:bg-sky-500/10'
+                    : permission === 'denied'
+                    ? 'text-neutral-600 cursor-not-allowed'
+                    : 'text-neutral-400 hover:text-white hover:bg-white/6'
+                )}
+              >
+                {permission === 'granted' ? (
+                  <svg className="h-4.5 w-4.5" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.057 2.118 5.52a.75.75 0 0 1-.297 1.206c-1.544.57-3.16.99-4.831 1.243a3.75 3.75 0 1 1-7.48 0 24.585 24.585 0 0 1-4.831-1.244.75.75 0 0 1-.298-1.205A8.217 8.217 0 0 0 5.25 9.75V9Z" />
+                  </svg>
+                ) : (
+                  <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+                  </svg>
+                )}
+              </button>
+            )}
+
+            {/* New chat */}
             <button
               onClick={handleNewChat}
               title="New chat"
-              className="p-2 rounded-lg text-neutral-400 hover:text-white hover:bg-white/5 transition-colors"
+              className="h-10 w-10 flex items-center justify-center rounded-xl text-neutral-400 hover:text-white hover:bg-white/6 transition-colors active:scale-95"
+              aria-label="New chat"
             >
-              <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+              <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
               </svg>
             </button>
           </div>
         </header>
 
+        {/* Messages */}
         <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-6 py-6 space-y-5">
+          <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-5">
             {isEmpty ? (
               <WelcomeScreen onSuggestionClick={handleFollowUpSelect} />
             ) : (
@@ -261,20 +324,20 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
                     exit={{ opacity: 0 }}
                     className="flex items-start gap-3"
                   >
-                    <div className="mt-1 h-7 w-7 flex-shrink-0 rounded-full bg-red-500/20 border border-red-500/30 flex items-center justify-center">
-                      <svg className="h-3.5 w-3.5 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <div className="mt-0.5 h-8 w-8 flex-shrink-0 rounded-full bg-red-500/10 border border-red-500/20 flex items-center justify-center">
+                      <svg className="h-4 w-4 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
                       </svg>
                     </div>
-                    <div className="flex flex-col gap-2">
-                      <p className="text-sm text-red-400">
+                    <div className="flex flex-col gap-2 pt-1">
+                      <p className="text-base text-red-400 leading-snug">
                         {error.message?.includes('quota') || error.message?.includes('rate')
                           ? 'Rate limit reached. Please wait a moment before trying again.'
                           : 'Something went wrong. Please try again.'}
                       </p>
                       <button
                         onClick={() => { clearError(); }}
-                        className="self-start text-xs text-neutral-500 hover:text-neutral-300 underline underline-offset-2 transition-colors"
+                        className="self-start text-sm text-neutral-500 hover:text-neutral-300 underline underline-offset-2 transition-colors"
                       >
                         Dismiss
                       </button>
@@ -287,7 +350,8 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
           </div>
         </div>
 
-        <div className="max-w-3xl mx-auto w-full">
+        {/* Follow-up chips */}
+        <div className="max-w-2xl mx-auto w-full">
           <FollowUpChips
             questions={followUpQuestions}
             onSelect={handleFollowUpSelect}
@@ -295,8 +359,9 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
           />
         </div>
 
+        {/* Input */}
         <div className="border-t border-white/5">
-          <div className="max-w-3xl mx-auto w-full">
+          <div className="max-w-2xl mx-auto w-full">
             <InputBar
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -314,7 +379,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
         onClose={() => dispatch({ type: 'CLEAR_DELETE_TARGET' })}
         title="Delete conversation"
       >
-        <p className="mb-5 text-sm text-neutral-400">
+        <p className="mb-5 text-base text-neutral-400 leading-relaxed">
           This conversation will be permanently deleted. This cannot be undone.
         </p>
         <div className="flex gap-3 justify-end">
@@ -344,27 +409,45 @@ function WelcomeScreen({ onSuggestionClick }: { onSuggestionClick: (q: string) =
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 16 }}
+      initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4 }}
-      className="flex flex-col items-center justify-center min-h-full text-center py-16"
+      transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+      className="flex flex-col items-center justify-center min-h-full text-center py-12"
     >
-      <div className="h-16 w-16 rounded-2xl bg-sky-600/20 border border-sky-500/30 flex items-center justify-center mb-4">
-        <span className="text-3xl font-bold text-sky-400">S</span>
+      {/* Logo mark */}
+      <div className="relative mb-6">
+        <div className="h-16 w-16 rounded-2xl bg-gradient-to-br from-sky-500 to-indigo-600 flex items-center justify-center shadow-2xl shadow-sky-900/40">
+          <svg className="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 8.25h9m-9 3H12m-9.75 1.51c0 1.6 1.123 2.994 2.707 3.227 1.129.166 2.27.293 3.423.379.35.026.67.21.865.501L12 21l2.755-4.133a1.14 1.14 0 0 1 .865-.501 48.172 48.172 0 0 0 3.423-.379c1.584-.233 2.707-1.626 2.707-3.228V6.741c0-1.602-1.123-2.995-2.707-3.228A48.394 48.394 0 0 0 12 3c-2.392 0-4.744.175-7.043.513C3.373 3.746 2.25 5.14 2.25 6.741v6.018Z" />
+          </svg>
+        </div>
+        <div className="absolute -bottom-1 -right-1 h-5 w-5 rounded-full bg-emerald-500 border-2 border-[#080c14] flex items-center justify-center">
+          <div className="h-1.5 w-1.5 rounded-full bg-white" />
+        </div>
       </div>
-      <h1 className="text-xl font-semibold text-white mb-2">Spur Support</h1>
-      <p className="text-sm text-neutral-400 mb-8 max-w-sm">
-        Ask me anything about Spur&apos;s features, integrations, pricing, or getting started.
+
+      <h1 className="text-xl font-semibold text-white mb-2 tracking-tight">
+        Spur Support
+      </h1>
+      <p className="text-base text-neutral-400 mb-8 max-w-xs leading-relaxed">
+        Ask me anything about Spur&apos;s features, integrations, or getting started.
       </p>
-      <div className="flex flex-wrap gap-2 justify-center max-w-md">
-        {suggestions.map((s) => (
-          <button
+
+      {/* Suggestion chips */}
+      <div className="flex flex-col gap-2 w-full max-w-sm">
+        {suggestions.map((s, i) => (
+          <motion.button
             key={s}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 + i * 0.06, ease: [0.16, 1, 0.3, 1] }}
             onClick={() => onSuggestionClick(s)}
-            className="rounded-full border border-white/10 bg-white/5 px-4 py-2 text-sm text-neutral-300 hover:bg-white/10 hover:border-white/20 transition-all"
+            className="flex items-center gap-3 rounded-xl border border-white/6 bg-white/3 px-4 py-3 text-left text-sm text-neutral-300 hover:bg-white/6 hover:border-white/10 hover:text-white transition-all active:scale-[0.98]"
+            style={{ minHeight: '52px', touchAction: 'manipulation' }}
           >
+            <div className="h-1.5 w-1.5 rounded-full bg-sky-500/60 flex-shrink-0" />
             {s}
-          </button>
+          </motion.button>
         ))}
       </div>
     </motion.div>
