@@ -3,7 +3,7 @@
 // marks them as sent.
 import { NextRequest } from 'next/server';
 import webpush from 'web-push';
-import { getPendingFollowUps, markFollowUpSent } from '@/lib/repositories/push-subscription.repo';
+import { getPendingFollowUps, scheduleFollowUp, markFollowUpSent } from '@/lib/repositories/push-subscription.repo';
 
 export const runtime = 'nodejs';
 
@@ -36,12 +36,22 @@ export async function GET(req: NextRequest) {
         url: `/${row.sessionId}`,
       });
 
-      await webpush.sendNotification(
-        { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
-        payload
-      );
-
-      await markFollowUpSent(row.sessionId);
+      try {
+        await webpush.sendNotification(
+          { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+          payload
+        );
+        // Re-schedule next follow-up so notifications keep coming until user replies.
+        // cancelFollowUp() in chat route stops this when the user sends a message.
+        await scheduleFollowUp(row.sessionId);
+      } catch (err: unknown) {
+        // 410 Gone = subscription expired/unsubscribed - stop sending to it
+        const status = (err as { statusCode?: number }).statusCode;
+        if (status === 410 || status === 404) {
+          await markFollowUpSent(row.sessionId);
+        }
+        throw err;
+      }
     })
   );
 
