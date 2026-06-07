@@ -1,0 +1,6 @@
+{
+  "worktree_base": ".conductor-worktrees",
+  "branch_prefix": "agent/",
+  "default_agent": "claude",
+  "max_parallel": 4
+}
