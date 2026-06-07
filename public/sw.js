@@ -7,12 +7,9 @@ self.addEventListener('push', (event) => {
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
-      // If any tab is focused, post a message so the page shows an in-app toast
-      // instead of relying on the OS banner (which Chrome suppresses on focused tabs)
-      const focused = clientList.find((c) => c.focused);
-      if (focused) {
-        focused.postMessage({ type: 'PUSH_RECEIVED', data });
-      }
+      // Post to all visible clients so the page can show an in-app toast.
+      // Each page checks document.hasFocus() itself to decide whether to render it.
+      clientList.forEach((c) => c.postMessage({ type: 'PUSH_RECEIVED', data }));
       // Always show the OS notification too (for unfocused/minimized state)
       return self.registration.showNotification(data.title ?? 'Spur Support', {
         body: data.body ?? 'New message from Spur Support',
