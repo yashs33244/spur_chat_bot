@@ -4,74 +4,150 @@
 
 A full server-side Web Push stack using VAPID authentication - the same mechanism Slack, Gmail, and WhatsApp Web use. Notifications reach the user's OS even after the browser tab is closed.
 
-**Feature:** after the AI replies to a message, a 5-minute timer starts on the server. If the user goes quiet (closes the tab, switches apps), the server fires an OS-level push: "Did we resolve your issue? We are here if you need more help." If the user sends another message before the timer expires, the follow-up is cancelled.
+**Feature:** after the AI replies to a message, a 5-minute timer starts on the server. If the user goes quiet (closes the tab, switches apps), the server fires an OS-level push: "Did we resolve your issue? We are here if you need more help." If the user sends another message before the timer expires, it is cancelled.
 
 ---
 
-## VAPID, Web Push Protocol, and the Headers in Depth
+## Who holds which key and why - the full picture
 
-### What is VAPID?
+This is the most confusing part of Web Push, so it deserves its own section before anything else.
 
-VAPID stands for **Voluntary Application Server Identification**. It is a protocol on top of the Web Push specification (RFC 8292) that lets your server cryptographically sign every push request it sends to FCM (Google) or APNs (Apple).
-
-Without VAPID, FCM and APNs would have no way to verify that the push request actually came from your server - anyone who obtained a user's push endpoint URL could spam them. VAPID solves this.
-
-### The key pair
-
-VAPID uses an **EC (Elliptic Curve) key pair on the P-256 curve**:
-
-- **Private key** - stored as a secret on your server. Never exposed. Signs every outgoing push request.
-- **Public key** - given to the browser during `pushManager.subscribe()`. FCM/APNs use it to verify the server's signature. Safe to expose in frontend code.
-
-Generate once:
-```bash
-npx web-push generate-vapid-keys
-```
-
-### How the browser uses the public key
-
-When `pushManager.subscribe()` is called, the browser sends the VAPID public key (`applicationServerKey`) to FCM/APNs as part of the subscription request. FCM/APNs store it alongside the subscription endpoint.
-
-From that point on, whenever a push arrives at that endpoint, FCM/APNs verify it was signed with the matching private key. If the signature does not match, the push is rejected before the device even sees it.
-
-### The Authorization header on server push requests
-
-Every time the server calls `webpush.sendNotification()`, the `web-push` npm package builds a signed HTTP POST to the subscription endpoint. The request has:
+There are **four distinct keys** in this system. Each one has one owner and one job.
 
 ```
-POST https://fcm.googleapis.com/fcm/send/... HTTP/1.1
-Authorization: vapid t=<JWT>,k=<public key base64url>
+                      +------------------+
+                      |   YOUR SERVER    |
+                      | (Vercel / Node)  |
+                      |                  |
+                      | VAPID Private Key|  <-- signs every push request
+                      | VAPID Public Key |  <-- embedded in app bundle
+                      +--------+---------+
+                               |
+                    signs HTTP POST to FCM/APNs
+                               |
+                               v
+               +---------------+---------------+
+               |    FCM (Google) / APNs (Apple) |
+               |                               |
+               |  Verifies VAPID signature     |
+               |  using public key it stored   |
+               |  at subscription time         |
+               +---------------+---------------+
+                               |
+                   encrypted push payload
+                               v
+                      +--------+---------+
+                      |   USER BROWSER   |
+                      |                  |
+                      | p256dh (pub key) |  <-- browser's own EC key
+                      | auth   (secret)  |  <-- 16-byte random
+                      +------------------+
+```
+
+### Key 1 - VAPID Private Key (`VAPID_PRIVATE_KEY`)
+
+**Who holds it:** your server only. Never leaves Vercel. Never sent to the browser. Never committed to git.
+
+**What it does:** signs every outgoing HTTP push request with ES256 (ECDSA + SHA-256). The signature goes in the `Authorization: vapid t=<JWT>,...` header. FCM and APNs reject any push where the signature does not match.
+
+**Why it matters:** without it, anyone who finds a user's push endpoint URL could spam them with fake notifications. The signature proves the push genuinely came from your server.
+
+**Env var:** `VAPID_PRIVATE_KEY` - no `NEXT_PUBLIC_` prefix, server-only.
+
+### Key 2 - VAPID Public Key (`NEXT_PUBLIC_VAPID_PUBLIC_KEY`)
+
+**Who holds it:** your server AND the browser. It is the matching half of the private key.
+
+**What it does (two jobs):**
+
+1. **At subscription time** - the browser sends it to FCM/APNs when creating the `PushSubscription`. FCM/APNs store it alongside the subscription endpoint. From this point on they will only accept pushes signed with the matching private key.
+
+2. **At push verification time** - FCM/APNs use it to verify the VAPID JWT signature on incoming push requests.
+
+**Why it is safe to expose:** it is a public key by design. It cannot be used to send pushes - you need the private key for that. It only lets FCM/APNs verify that a push came from you.
+
+**Env var:** `NEXT_PUBLIC_VAPID_PUBLIC_KEY` - the `NEXT_PUBLIC_` prefix deliberately inlines it into the browser bundle at build time (Next.js static replacement).
+
+### Key 3 - p256dh (Browser's EC public key)
+
+**Who holds it:** the browser generates it; the browser stores it; your server stores a copy in the `push_subscriptions` DB table.
+
+**What it does:** used by your server to encrypt the notification payload. The server performs ECDH (Elliptic-Curve Diffie-Hellman) with this key to derive a shared encryption secret. Only the browser that generated this key pair can decrypt the payload.
+
+**Why it matters:** FCM and APNs are the relay - they see the encrypted bytes but cannot read the notification body. End-to-end encrypted in transit.
+
+**Where it lives in code:**
+```ts
+// returned by pushManager.subscribe()
+const json = sub.toJSON();
+// json.keys.p256dh  <-- this key
+// stored via POST /api/push/subscribe
+```
+
+### Key 4 - auth (16-byte random secret)
+
+**Who holds it:** the browser generates it; your server stores a copy alongside p256dh.
+
+**What it does:** mixed into the encryption key derivation process (HKDF). Prevents a rogue push server that somehow obtained your p256dh from sending fake notifications. Acts as a second factor in the shared-secret derivation.
+
+**Where it lives in code:**
+```ts
+// json.keys.auth  <-- this value
+```
+
+### Summary table
+
+| Key | Generated by | Stored at | Used by | Purpose |
+|---|---|---|---|---|
+| VAPID Private | You (once, offline) | Server env var only | Server | Signs every outgoing push request |
+| VAPID Public | You (once, offline) | Server + browser bundle | Browser (subscribe), FCM/APNs (verify) | Proves pushes come from your server |
+| p256dh | Browser (per install) | Browser + your DB | Server | Encrypts notification payload |
+| auth | Browser (per install) | Browser + your DB | Server | Second factor in payload encryption |
+
+---
+
+## VAPID protocol and headers in depth
+
+### The Authorization header
+
+Every push the server sends is an HTTP POST to the FCM/APNs endpoint with:
+
+```
+POST https://fcm.googleapis.com/fcm/send/<device-token> HTTP/1.1
+Authorization: vapid t=<JWT>,k=<VAPID public key base64url>
 Content-Type: application/octet-stream
 Content-Encoding: aes128gcm
 TTL: 86400
 ```
 
-Breaking down the `Authorization` header:
+Breaking it down:
 
-- `vapid` - the scheme name, tells the push server this is a VAPID-signed request
-- `t=<JWT>` - a signed JSON Web Token. The JWT payload contains:
-  - `aud`: the push service origin (e.g. `https://fcm.googleapis.com`)
-  - `exp`: expiry timestamp (usually 24 hours from now)
-  - `sub`: a `mailto:` contact URI (`VAPID_EMAIL`) so push services can contact you if something is wrong
-  The JWT is signed with the VAPID private key using ES256 (ECDSA + SHA-256)
-- `k=<public key>` - the VAPID public key in base64url format, so the push server knows which key to verify against
+**`vapid`** - the auth scheme. Tells FCM/APNs this is a VAPID-authenticated request, not a legacy GCM request.
+
+**`t=<JWT>`** - a JSON Web Token signed with the VAPID private key (ES256). The JWT payload:
+```json
+{
+  "aud": "https://fcm.googleapis.com",   // which push service this is for
+  "exp": 1234567890,                      // expires 24h from now
+  "sub": "mailto:support@spurnow.com"    // contact if something is wrong
+}
+```
+The JWT is signed with the VAPID private key. FCM/APNs verify it using the VAPID public key they stored when the subscription was created.
+
+**`k=<public key>`** - the VAPID public key in base64url encoding. Tells the push service which key to verify against (in case they serve multiple applications).
+
+**`TTL: 86400`** - if the device is offline, hold the push for up to 24 hours and deliver when it reconnects. TTL 0 means discard if not immediately deliverable.
 
 ### Payload encryption (RFC 8291)
 
-The notification body is not sent in plaintext. It is encrypted end-to-end using the browser's own `p256dh` public key and the `auth` secret from the `PushSubscription`:
+The notification body is AES-128-GCM encrypted end-to-end using the browser's `p256dh` and `auth`. Steps:
 
-```
-p256dh  - the browser's EC public key (Diffie-Hellman)
-auth    - a 16-byte random secret
-```
+1. Server performs ECDH with `p256dh` to derive a shared secret
+2. Server uses `auth` + HKDF to expand that into an encryption key and nonce
+3. Payload is encrypted with AES-128-GCM
+4. `Content-Encoding: aes128gcm` header tells the push service the encoding
 
-The server (via `web-push`) performs ECDH key agreement using `p256dh` to derive a shared secret, then uses `auth` as additional keying material, and encrypts the payload with AES-128-GCM. Only the browser that generated that key pair can decrypt it. Even FCM and APNs cannot read the notification body in transit.
-
-The `Content-Encoding: aes128gcm` header tells the push service which encryption scheme was used.
-
-### TTL header
-
-`TTL: 86400` means the push service should hold the notification for up to 24 hours if the device is offline and deliver it when it reconnects. Setting TTL to 0 means discard if not immediately deliverable.
+FCM and APNs relay the encrypted bytes to the device without being able to read them. The service worker receives the raw bytes and the browser decrypts them using its private half of the `p256dh` key pair.
 
 ---
 
@@ -79,44 +155,40 @@ The `Content-Encoding: aes128gcm` header tells the push service which encryption
 
 ### New table: `push_subscriptions`
 
-Stores one row per session. When a user grants notification permission, the browser creates a `PushSubscription` object. We store the three values we need to send pushes to that browser later:
+One row per session. The three browser-generated values needed to send a push later:
 
-**Schema** (`lib/db/schema.ts`):
 ```ts
+// lib/db/schema.ts
 export const pushSubscriptions = pgTable('push_subscriptions', {
   id:        uuid('id').primaryKey().defaultRandom().notNull(),
-  sessionId: uuid('session_id').notNull().unique(),
-  endpoint:  text('endpoint').notNull(),   // FCM or APNs URL for this browser
-  p256dh:    text('p256dh').notNull(),     // browser's public key for payload encryption
-  auth:      text('auth').notNull(),       // 16-byte secret for encryption
+  sessionId: uuid('session_id').notNull().unique(),  // one subscription per session
+  endpoint:  text('endpoint').notNull(),              // FCM or APNs URL
+  p256dh:    text('p256dh').notNull(),               // browser's public key for encryption
+  auth:      text('auth').notNull(),                  // 16-byte secret for encryption
   createdAt: timestamp('created_at').defaultNow().notNull(),
 });
 ```
 
-The `sessionId` column has a `UNIQUE` constraint so one session can only have one active subscription (upsert pattern - if the user re-grants permission it just updates the endpoint).
+`sessionId` is UNIQUE - if the user re-grants permission in the same session it just updates the endpoint.
 
 ### Modified table: `conversations`
 
-Two columns added to track the follow-up state:
-
 ```ts
-// in the conversations table definition
-followupScheduledAt: timestamp('followup_scheduled_at'),       // nullable - when to fire the follow-up
+followupScheduledAt: timestamp('followup_scheduled_at'),       // nullable - when to fire
 followupSent:        boolean('followup_sent').default(false).notNull(),
 ```
 
-- `followup_scheduled_at` - set to `NOW() + 5 minutes` after every AI reply. Null means no follow-up is pending.
-- `followup_sent` - flipped to `true` after the push is sent, or if the user replies first (cancels it). Prevents duplicate sends.
+- Set to `NOW() + 5min` after every AI reply via `scheduleFollowUp()`
+- Reset to null / true on next user message via `cancelFollowUp()`
+- Flipped to true after push is sent via `markFollowUpSent()`
 
 ### Migration: `drizzle/0003_push_notifications.sql`
 
 ```sql
--- Follow-up scheduling on conversations
 ALTER TABLE "conversations"
   ADD COLUMN IF NOT EXISTS "followup_scheduled_at" TIMESTAMPTZ,
   ADD COLUMN IF NOT EXISTS "followup_sent" BOOLEAN NOT NULL DEFAULT FALSE;
 
--- Push subscriptions (one per session/device)
 CREATE TABLE IF NOT EXISTS "push_subscriptions" (
   "id"         UUID PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
   "session_id" UUID NOT NULL UNIQUE,
@@ -126,18 +198,16 @@ CREATE TABLE IF NOT EXISTS "push_subscriptions" (
   "created_at" TIMESTAMPTZ DEFAULT NOW() NOT NULL
 );
 
--- Index for subscription lookups by session
+-- Index for fast subscription lookups
 CREATE INDEX IF NOT EXISTS "push_subscriptions_session_id_idx"
   ON "push_subscriptions" ("session_id");
 
--- Partial index for the cron query - only rows that are pending and due
--- This is the exact query the cron runs every minute; a full-table scan would be wasteful
+-- Partial index - only rows that are pending and not yet sent
+-- Cron runs every minute; without this it would scan all conversations
 CREATE INDEX IF NOT EXISTS "conversations_followup_idx"
   ON "conversations" ("followup_scheduled_at")
   WHERE "followup_sent" = FALSE AND "followup_scheduled_at" IS NOT NULL;
 ```
-
-The partial index on `conversations` is important. The cron runs every minute and queries `WHERE followup_scheduled_at <= NOW() AND followup_sent = FALSE`. Without the index this scans every row in conversations. With the partial index it only touches the small subset that has a pending follow-up.
 
 ---
 
@@ -145,7 +215,7 @@ The partial index on `conversations` is important. The cron runs every minute an
 
 ### `public/sw.js` (new)
 
-The service worker is the bridge between the push server and the OS notification system. It runs in a background thread, separate from the page.
+Runs in background. The only JavaScript context that can receive server push events and show OS notifications after the tab closes.
 
 ```js
 self.addEventListener('install', () => self.skipWaiting());
@@ -155,12 +225,10 @@ self.addEventListener('push', (event) => {
   const data = event.data?.json() ?? {};
   event.waitUntil(
     self.registration.showNotification(data.title ?? 'Spur Support', {
-      body: data.body ?? 'New message from Spur Support',
-      icon: '/icon-192.png',
-      badge: '/icon-72.png',
-      data: { url: data.url ?? '/' },
-      tag: 'spur-chat',   // same tag replaces existing notification rather than stacking
+      body: data.body,
+      tag: 'spur-chat',    // replaces existing notification instead of stacking
       renotify: true,
+      data: { url: data.url ?? '/' },
     })
   );
 });
@@ -169,72 +237,25 @@ self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const url = event.notification.data?.url ?? '/';
   event.waitUntil(
-    clients
-      .matchAll({ type: 'window', includeUncontrolled: true })
-      .then((clientList) => {
-        for (const client of clientList) {
-          if (client.url.includes(self.location.origin) && 'focus' in client) {
-            return client.focus();  // bring existing tab to front
-          }
-        }
-        return clients.openWindow(url);  // no open tab - open a new one
-      })
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((list) => {
+      for (const c of list) {
+        if (c.url.includes(self.location.origin) && 'focus' in c) return c.focus();
+      }
+      return clients.openWindow(url);
+    })
   );
 });
 ```
 
-`skipWaiting()` + `clients.claim()` ensures a newly installed service worker takes over immediately without waiting for existing tabs to close. Without this, a user who has never visited before would not get the service worker activated until they refresh.
-
-### `public/manifest.json` (new)
-
-Enables "Add to Home Screen" on Android and iOS, which is required for Web Push to work on iOS:
-
-```json
-{
-  "name": "Spur Support",
-  "short_name": "Spur",
-  "display": "standalone",
-  "start_url": "/",
-  "theme_color": "#0284c7",
-  "background_color": "#080c14",
-  "icons": [{ "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }]
-}
-```
-
-### `app/layout.tsx` (modified)
-
-Two additions:
-
-**1. Register the service worker** - runs after the page is interactive (not during SSR):
-```tsx
-<Script id="register-sw" strategy="afterInteractive">
-  {`if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
-  }`}
-</Script>
-```
-
-**2. PWA metadata** for iOS:
-```ts
-export const metadata = {
-  manifest: '/manifest.json',
-  appleWebApp: { capable: true, statusBarStyle: 'black-translucent' },
-};
-export const viewport = {
-  themeColor: '#0284c7',
-  viewportFit: 'cover',
-};
-```
+`skipWaiting()` + `clients.claim()` ensures the SW activates immediately on first install without requiring a page refresh.
 
 ### `hooks/usePushNotifications.ts` (new)
 
-The client-side hook that manages the full permission + subscription lifecycle.
+**Permission state - SSR fix:**
 
-**Permission state with SSR fix:**
+`useState` initializers run on the server where `Notification` is undefined. Starting at `'default'` is safe for both server and client. The real value is read after hydration via `setTimeout(fn, 0)`.
+
 ```ts
-// Start at 'default' - the same value on server and client
-// Never read Notification.permission during render (server has no Notification API)
 const [permission, setPermission] = useState<NotifPermission>('default');
 
 useEffect(() => {
@@ -242,9 +263,7 @@ useEffect(() => {
     if (typeof Notification === 'undefined') { setPermission('unsupported'); return; }
     setPermission(Notification.permission as NotifPermission);
   }, 0);
-  // Poll every 4 seconds to catch changes (user can change in browser settings)
-  const id = setInterval(() => {
-    if (typeof Notification === 'undefined') return;
+  const id = setInterval(() => {  // poll every 4s - user can change in browser settings
     const current = Notification.permission as NotifPermission;
     setPermission((prev) => (prev === current ? prev : current));
   }, 4000);
@@ -252,23 +271,43 @@ useEffect(() => {
 }, []);
 ```
 
-**Requesting permission and creating the VAPID subscription:**
+**Permission request + subscription registration:**
+
+Handles two cases: new user (shows dialog) and returning user (already granted, silently re-registers):
+
 ```ts
-async function requestPermission(sessionId?: string) {
+const requestPermission = useCallback(async (sessionId?: string) => {
+  if (typeof Notification === 'undefined') return 'unsupported';
+
+  // Returning user - permission already granted, no dialog needed
+  // Just ensure this new session's ID is in the DB
+  if (Notification.permission === 'granted') {
+    setPermission('granted');
+    if (sessionId) await registerServerSubscription(sessionId);
+    return 'granted';
+  }
+
+  // New user - show the browser permission dialog
   const result = await Notification.requestPermission();
   setPermission(result as NotifPermission);
-  if (result === 'granted' && sessionId) {
-    await registerServerSubscription(sessionId);
-    // Fire a test notification immediately so the user sees the system works
-    fireNotification('Notifications enabled', 'You will be notified when we reply.');
+  if (result === 'granted') {
+    // Immediate test notification proves the system works
+    await fireNotification('Spur Support', "Notifications enabled - you'll be notified when we reply");
+    if (sessionId) await registerServerSubscription(sessionId);
   }
-}
+  return result as NotifPermission;
+}, []);
+```
 
+**VAPID subscription creation:**
+
+```ts
 async function registerServerSubscription(sessionId: string) {
   const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
   if (!vapidKey || !('serviceWorker' in navigator)) return;
   const reg = await navigator.serviceWorker.ready;
   const existing = await reg.pushManager.getSubscription();
+  // reuse existing sub if one exists - no point creating a new one
   const sub = existing ?? await reg.pushManager.subscribe({
     userVisibleOnly: true,
     applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
@@ -277,21 +316,29 @@ async function registerServerSubscription(sessionId: string) {
   await fetch('/api/push/subscribe', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionId,
-      endpoint: json.endpoint,
-      p256dh: json.keys!.p256dh,
-      auth: json.keys!.auth,
-    }),
+    body: JSON.stringify({ sessionId, endpoint: json.endpoint, p256dh: json.keys.p256dh, auth: json.keys.auth }),
   });
 }
 ```
 
-`urlBase64ToUint8Array` converts the base64url VAPID public key string to an `ArrayBuffer` - the exact format the browser's `pushManager.subscribe()` expects.
+`urlBase64ToUint8Array` converts the VAPID public key from a base64url string (how it arrives in env vars) to an `ArrayBuffer` - the format `pushManager.subscribe()` requires.
+
+### `components/features/chat/ChatInterface.tsx` (modified)
+
+`requestPermission` is called on the first message send - a user gesture is required by all browsers before the permission dialog can appear. It handles both new and returning users:
+
+```ts
+// On handleSend and handleFollowUpSelect:
+// - 'default': shows the permission dialog
+// - 'granted': silently registers subscription for this new session (no dialog)
+if (permission === 'default' || permission === 'granted') {
+  requestPermission(sessionId).catch(() => {});
+}
+```
 
 ### `app/api/push/subscribe/route.ts` (new)
 
-Receives and stores the PushSubscription. Validates with Zod before touching the DB:
+Receives and upserts the subscription. Idempotent - calling it multiple times for the same session just updates the endpoint:
 
 ```ts
 const bodySchema = z.object({
@@ -304,34 +351,19 @@ const bodySchema = z.object({
 export async function POST(req: NextRequest) {
   const parsed = bodySchema.safeParse(await req.json());
   if (!parsed.success) return Response.json({ error: 'Invalid' }, { status: 400 });
-  const { sessionId, endpoint, p256dh, auth } = parsed.data;
-  await upsertPushSubscription(sessionId, endpoint, p256dh, auth);
+  await upsertPushSubscription(...parsed.data);
   return Response.json({ ok: true });
 }
 ```
-
-Also exposes a `DELETE ?sessionId=...` for unsubscribing.
 
 ### `lib/repositories/push-subscription.repo.ts` (new)
 
 All DB operations for push in one file:
 
 ```ts
-// Store or update subscription for a session
-export async function upsertPushSubscription(sessionId, endpoint, p256dh, auth) {
-  const db = getDb();
-  await db.insert(schema.pushSubscriptions)
-    .values({ sessionId, endpoint, p256dh, auth })
-    .onConflictDoUpdate({
-      target: schema.pushSubscriptions.sessionId,
-      set: { endpoint, p256dh, auth },
-    });
-}
-
-// Called in onFinish after every AI reply
+// Called after every AI reply
 export async function scheduleFollowUp(sessionId: string) {
-  const db = getDb();
-  const followupAt = new Date(Date.now() + 5 * 60 * 1000);  // NOW + 5 min
+  const followupAt = new Date(Date.now() + 5 * 60 * 1000);
   await db.update(schema.conversations)
     .set({ followupScheduledAt: followupAt, followupSent: false })
     .where(eq(schema.conversations.id, sessionId));
@@ -339,26 +371,16 @@ export async function scheduleFollowUp(sessionId: string) {
 
 // Called when user sends a new message - cancels pending follow-up
 export async function cancelFollowUp(sessionId: string) {
-  const db = getDb();
   await db.update(schema.conversations)
     .set({ followupScheduledAt: null, followupSent: true })
     .where(eq(schema.conversations.id, sessionId));
 }
 
-// Called by cron every minute - finds all due follow-ups with subscriptions
+// Called by cron - finds all due follow-ups with subscriptions
 export async function getPendingFollowUps() {
-  const db = getDb();
-  return db.select({
-      sessionId: schema.conversations.id,
-      endpoint:  schema.pushSubscriptions.endpoint,
-      p256dh:    schema.pushSubscriptions.p256dh,
-      auth:      schema.pushSubscriptions.auth,
-    })
+  return db.select({ sessionId, endpoint, p256dh, auth })
     .from(schema.conversations)
-    .innerJoin(
-      schema.pushSubscriptions,
-      eq(schema.pushSubscriptions.sessionId, schema.conversations.id)
-    )
+    .innerJoin(schema.pushSubscriptions, eq(...))
     .where(and(
       isNotNull(schema.conversations.followupScheduledAt),
       lte(schema.conversations.followupScheduledAt, new Date()),
@@ -370,155 +392,139 @@ export async function getPendingFollowUps() {
 
 ### `app/api/push/followup/route.ts` (new)
 
-The cron handler. Called by Vercel every minute:
+The cron handler - signs and sends pushes, marks rows as sent:
 
 ```ts
-export async function GET(req: NextRequest) {
-  // Vercel Cron sets Authorization: Bearer <CRON_SECRET> automatically
-  const authHeader = req.headers.get('authorization');
-  if (CRON_SECRET && authHeader !== `Bearer ${CRON_SECRET}`) {
-    return Response.json({ error: 'Unauthorized' }, { status: 401 });
-  }
+webpush.setVapidDetails(`mailto:${VAPID_EMAIL}`, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-  webpush.setVapidDetails(`mailto:${VAPID_EMAIL}`, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
-
-  const pending = await getPendingFollowUps();
-  const results = await Promise.allSettled(
-    pending.map(async (row) => {
-      const payload = JSON.stringify({
-        title: 'Spur Support - Quick Check',
-        body:  'Did we resolve your issue? We are here if you need more help.',
-        url:   `/${row.sessionId}`,
-      });
-      await webpush.sendNotification(
-        { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
-        payload
-      );
-      await markFollowUpSent(row.sessionId);
-    })
-  );
-
-  const sent   = results.filter(r => r.status === 'fulfilled').length;
-  const failed = results.filter(r => r.status === 'rejected').length;
-  return Response.json({ sent, failed, total: pending.length });
-}
+const pending = await getPendingFollowUps();
+// Promise.allSettled - one failed push (expired subscription) does not block others
+const results = await Promise.allSettled(
+  pending.map(async (row) => {
+    await webpush.sendNotification(
+      { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } },
+      JSON.stringify({ title: 'Spur Support - Quick Check', body: '...', url: `/${row.sessionId}` })
+    );
+    await markFollowUpSent(row.sessionId);
+  })
+);
 ```
-
-`Promise.allSettled` (not `Promise.all`) is deliberate - one failed push (e.g. expired subscription) should not prevent the others from sending.
 
 ### `app/api/chat/route.ts` (modified)
 
-Two additions around message handling:
-
 ```ts
-// When user sends a new message - cancel any pending follow-up (they are active)
+// User sends a message - cancel any pending follow-up (they are active again)
 cancelFollowUp(sessionId).catch(() => {});
 
-// In onFinish callback after AI reply - schedule a follow-up 5 minutes out
+// AI finishes replying - schedule a follow-up 5 minutes out
 scheduleFollowUp(sessionId).catch(() => {});
 ```
 
-Both calls are fire-and-forget (`.catch(() => {})`). A failure here is non-fatal - the chat stream has already completed successfully.
+Both are fire-and-forget. A DB failure here is non-fatal - the chat stream has already finished successfully.
+
+### `app/layout.tsx` (modified)
+
+Registers the service worker after the page is interactive (not during SSR, which has no navigator):
+
+```tsx
+<Script id="register-sw" strategy="afterInteractive">
+  {`if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }`}
+</Script>
+```
+
+Also adds PWA metadata (`manifest.json`, `appleWebApp`, `themeColor`) required for iOS "Add to Home Screen".
 
 ### `vercel.json` (new)
 
 ```json
-{
-  "crons": [{ "path": "/api/push/followup", "schedule": "* * * * *" }]
-}
+{ "crons": [{ "path": "/api/push/followup", "schedule": "0 9 * * *" }] }
 ```
 
-`* * * * *` = every minute. Requires Vercel Pro for sub-hourly. On Hobby, point an external cron (cron-job.org) at the same endpoint with `Authorization: Bearer <CRON_SECRET>`.
+Hobby plan is limited to daily cron. For minute-level follow-ups, use an external cron (cron-job.org is free) calling `GET /api/push/followup` with `Authorization: Bearer <CRON_SECRET>`.
+
+---
+
+## Bug found and fixed during testing
+
+**What was wrong:** returning users (permission already `granted` from a previous visit) never had their push subscription registered for new sessions. The code only called `requestPermission()` when `permission === 'default'`. If the browser already had permission, the new session ID was never associated with a subscription in the DB. The follow-up cron would do a JOIN and find no matching subscription, silently skipping them.
+
+**How it was found:** manual browser test via DevTools. `Notification.permission` returned `'granted'` but `pushManager.getSubscription()` returned `null` on first send.
+
+**Fix in `usePushNotifications.ts`:**
+
+```ts
+// Before fix:
+const result = await Notification.requestPermission();
+// always called browser dialog, subscription only registered if transitioning to granted
+
+// After fix:
+if (Notification.permission === 'granted') {
+  // already granted - skip dialog, just register subscription for this session
+  if (sessionId) await registerServerSubscription(sessionId);
+  return 'granted';
+}
+// else: show dialog as before
+```
+
+**Fix in `ChatInterface.tsx`:**
+
+```ts
+// Before:
+if (permission === 'default') requestPermission(sessionId).catch(() => {})
+// After:
+if (permission === 'default' || permission === 'granted') requestPermission(sessionId).catch(() => {})
+```
+
+`registerServerSubscription` is idempotent - it calls `getSubscription()` first and reuses the existing sub, then upserts to DB. Calling it on every send is safe.
 
 ---
 
 ## End-to-end flow
 
 ```
-User sends first message
-  -> handleSend fires (user gesture - required by browsers for permission prompt)
-  -> Notification.requestPermission() called
-  -> Browser shows native "Allow notifications?" dialog
-  -> User clicks Allow
+First visit:
+  User sends message -> handleSend fires (user gesture - required by browsers)
+  permission === 'default' -> requestPermission(sessionId) called
+  Browser shows "Allow notifications?" dialog
+  User clicks Allow
+  registerServerSubscription(sessionId) called
+  pushManager.subscribe({ applicationServerKey: VAPID_PUBLIC_KEY })
+    -> FCM returns endpoint + p256dh + auth
+  POST /api/push/subscribe -> upserted to push_subscriptions table
+  Test notification fires immediately: "Notifications enabled"
 
-Browser creates PushSubscription
-  -> pushManager.subscribe({ applicationServerKey: VAPID_PUBLIC_KEY })
-  -> FCM/APNs return { endpoint, keys: { p256dh, auth } }
-  -> Endpoint is unique to this browser install on Google/Apple's infrastructure
+Return visit:
+  User sends message -> permission === 'granted'
+  requestPermission(sessionId) called (no dialog shown)
+  registerServerSubscription(sessionId) called silently
+  New session ID associated with existing FCM subscription in DB
 
-App stores subscription
-  -> POST /api/push/subscribe { sessionId, endpoint, p256dh, auth }
-  -> Upserted into push_subscriptions table in Neon
+After AI replies:
+  onFinish: scheduleFollowUp(sessionId)
+  conversations.followup_scheduled_at = NOW() + 5 min
 
-AI replies to a message
-  -> /api/chat onFinish: scheduleFollowUp(sessionId)
-  -> conversations.followup_scheduled_at = NOW() + 5 minutes
-  -> conversations.followup_sent = false
+User replies before 5 minutes:
+  cancelFollowUp(sessionId) -> followup_scheduled_at = NULL, followup_sent = true
 
-User replies before 5 minutes
-  -> cancelFollowUp(sessionId) on next message
-  -> followup_scheduled_at = NULL, followup_sent = true
-  -> No notification sent
+User goes quiet / closes tab:
+  Cron hits GET /api/push/followup
+  JOIN conversations + push_subscriptions WHERE followup_scheduled_at <= NOW() AND followup_sent = false
+  webpush.sendNotification():
+    - Signs JWT with VAPID private key
+    - Encrypts payload with p256dh + auth
+    - POSTs to FCM / APNs endpoint
+  markFollowUpSent()
 
-User goes quiet / closes the tab
-  -> Vercel Cron fires GET /api/push/followup every minute
-  -> Queries conversations JOIN push_subscriptions
-     WHERE followup_scheduled_at <= NOW() AND followup_sent = false
-  -> For each row:
-       web-push builds signed HTTP POST to row.endpoint
-       Authorization: vapid t=<JWT signed with private key>,k=<public key>
-       Payload encrypted with AES-128-GCM using row.p256dh + row.auth
-       POSTs to FCM (Chrome/Android) or APNs (Safari/iOS)
-       markFollowUpSent(sessionId) called after successful send
+FCM/APNs relay to device:
+  sw.js 'push' event fires in background
+  showNotification() -> OS renders notification
 
-Google/Apple relays to device
-  -> sw.js wakes up - 'push' event fires in background thread
-  -> self.registration.showNotification("Spur Support - Quick Check", ...)
-  -> OS renders the notification even with browser fully closed
-
-User taps notification
-  -> notificationclick in sw.js
-  -> Finds open tab matching origin -> client.focus()
-  -> No open tab -> clients.openWindow("/{sessionId}")
+User taps notification:
+  notificationclick in sw.js
+  client.focus() if tab open, otherwise openWindow("/{sessionId}")
 ```
-
----
-
-## Why a service worker is required
-
-JavaScript in a browser tab stops running the moment the tab closes. A service worker is a separate background script registered once per origin. It:
-
-1. Survives tab close (as long as the browser process is running)
-2. Is the only JavaScript context that can receive a `push` event from FCM/APNs
-3. Can call `self.registration.showNotification()` to render an OS notification
-4. Can handle `notificationclick` to bring the right tab into focus
-
-Without a service worker, notifications can only be shown while the tab is open. The entire follow-up feature requires delivering to a user who has already left.
-
----
-
-## The SSR hydration bug that was fixed
-
-`useState` initializer functions in Next.js run on the server during SSR. Node.js has no `Notification` API. The original code read `Notification.permission` directly in the initializer, which evaluates to `'unsupported'` on the server. React hydrated the client with that server-rendered value, so the bell icon appeared permanently disabled on Chrome, Firefox, and macOS Safari - every browser.
-
-**Fix in `hooks/usePushNotifications.ts`:**
-
-```ts
-// 'default' is a safe neutral value both server and client agree on
-const [permission, setPermission] = useState<NotifPermission>('default');
-
-useEffect(() => {
-  // setTimeout(fn, 0) defers until after hydration completes
-  // also satisfies react-hooks/set-state-in-effect lint rule
-  const t = setTimeout(() => {
-    if (typeof Notification === 'undefined') { setPermission('unsupported'); return; }
-    setPermission(Notification.permission as NotifPermission);
-  }, 0);
-  return () => clearTimeout(t);
-}, []);
-```
-
-The `setTimeout(fn, 0)` is the key. It ensures the state update runs after React has reconciled the hydrated DOM, so the server and client both start with `'default'` and the client corrects to the real value in the next event loop tick.
 
 ---
 
@@ -526,38 +532,32 @@ The `setTimeout(fn, 0)` is the key. It ensures the state update runs after React
 
 | Platform | Works? | Reason |
 |---|---|---|
-| Chrome / Edge / Firefox (desktop) | Yes | Full Web Push API + service worker support |
-| Android Chrome | Yes | Works even with browser backgrounded or killed |
-| macOS Safari 16.1+ | Yes | Apple shipped Web Push support in Safari 16.1 (Nov 2022) |
-| iOS PWA (Add to Home Screen, iOS 16.4+) | Yes | Apple enabled Web Push for installed PWAs in iOS 16.4 (Mar 2023) |
-| iOS Safari (browser tab) | No | Apple restricts Web Push to installed PWAs only - browser tabs cannot receive pushes |
-| Chrome on iOS | No | Apple requires all iOS browsers to use WebKit - the same PWA restriction applies |
+| Chrome / Edge / Firefox (desktop) | Yes | Full Web Push API support |
+| Android Chrome | Yes | Works with browser backgrounded or killed |
+| macOS Safari 16.1+ | Yes | Apple shipped Web Push in Safari 16.1 (Nov 2022) |
+| iOS PWA (Add to Home Screen, iOS 16.4+) | Yes | Apple enabled Web Push for installed PWAs in iOS 16.4 |
+| iOS Safari (browser tab) | No | Apple restricts Web Push to installed PWAs only |
+| Chrome on iOS | No | Apple requires all iOS browsers to use WebKit - same restriction |
 
-For iOS browser users the app shows a dismissible install banner directing them to "Tap Share then Add to Home Screen". Once installed as a PWA the experience is identical to Android.
+For iOS browser users the app shows a dismissible install banner. Once installed as a PWA the experience is identical to Android.
 
 ---
 
 ## Setup
 
-Generate VAPID keys once per deployment:
-
 ```bash
 npx web-push generate-vapid-keys
 ```
 
-Set as environment variables (Vercel dashboard or CLI):
-
 ```
-NEXT_PUBLIC_VAPID_PUBLIC_KEY=<public key>   # safe to expose - used by browser
-VAPID_PRIVATE_KEY=<private key>             # secret - signs every push
-VAPID_EMAIL=support@yourapp.com             # required by VAPID spec (mailto: contact)
-CRON_SECRET=<random string>                 # protects /api/push/followup from abuse
+NEXT_PUBLIC_VAPID_PUBLIC_KEY=<public key>    # goes into browser bundle - safe to expose
+VAPID_PRIVATE_KEY=<private key>             # server only - never expose, never commit
+VAPID_EMAIL=support@yourapp.com             # required by VAPID spec
+CRON_SECRET=<random string>                 # protects /api/push/followup
 ```
-
-Apply the DB migration:
 
 ```bash
 psql $DATABASE_URL -f drizzle/0003_push_notifications.sql
 ```
 
-**Important:** never commit real VAPID keys to the repo. Store them only in environment variables. The `NEXT_PUBLIC_` prefix makes the public key available to browser code at build time - this is intentional and safe. The private key must never have the `NEXT_PUBLIC_` prefix.
+**Important:** if you rotate VAPID keys (e.g. after an accidental exposure), all existing `PushSubscription` objects in the browser become invalid because they were created with the old public key. Users need to re-grant permission (or just send a new message - the fix above re-subscribes them automatically with the new key pair).
