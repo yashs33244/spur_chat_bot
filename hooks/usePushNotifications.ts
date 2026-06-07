@@ -4,27 +4,57 @@ import { useState, useEffect, useCallback } from 'react';
 
 export type NotifPermission = 'default' | 'granted' | 'denied' | 'unsupported';
 
-export function usePushNotifications() {
-  const [permission, setPermission] = useState<NotifPermission>(() => {
-    if (typeof Notification === 'undefined') return 'unsupported';
-    return Notification.permission;
-  });
+export function isIOSDevice(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return (
+    /iPhone|iPad|iPod/.test(navigator.userAgent) ||
+    // iPad on iOS 13+ reports as MacIntel with touch points
+    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+  );
+}
 
-  // Keep in sync if the user changes browser settings while the tab is open
+export function isInstalledPWA(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    // iOS Safari standalone flag
+    (window.navigator as { standalone?: boolean }).standalone === true
+  );
+}
+
+export function usePushNotifications() {
+  // Start with 'default' - safe for SSR. Real value is detected after mount.
+  const [permission, setPermission] = useState<NotifPermission>('default');
+
   useEffect(() => {
-    if (typeof Notification === 'undefined') return;
+    // Defer initial detection so it runs after hydration and avoids
+    // synchronous setState-in-effect lint rule
+    const t = setTimeout(() => {
+      if (typeof Notification === 'undefined') {
+        setPermission('unsupported');
+        return;
+      }
+      setPermission(Notification.permission as NotifPermission);
+    }, 0);
+
+    // Poll for changes (user may change browser settings while tab is open)
     const id = setInterval(() => {
-      const current = Notification.permission;
-      setPermission((prev) => (prev !== current ? current : prev));
-    }, 5000);
-    return () => clearInterval(id);
+      if (typeof Notification === 'undefined') return;
+      const current = Notification.permission as NotifPermission;
+      setPermission((prev) => (prev === current ? prev : current));
+    }, 4000);
+
+    return () => {
+      clearTimeout(t);
+      clearInterval(id);
+    };
   }, []);
 
   const requestPermission = useCallback(async (): Promise<NotifPermission> => {
     if (typeof Notification === 'undefined') return 'unsupported';
     const result = await Notification.requestPermission();
-    setPermission(result);
-    return result;
+    setPermission(result as NotifPermission);
+    return result as NotifPermission;
   }, []);
 
   const notify = useCallback(async (title: string, body: string, url?: string) => {
@@ -48,7 +78,7 @@ export function usePushNotifications() {
         });
         return;
       } catch {
-        // fall through to basic notification
+        // fall through
       }
     }
 

@@ -15,7 +15,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useConversations } from '@/hooks/useConversations';
 import { useFollowUp } from '@/hooks/useFollowUp';
-import { usePushNotifications } from '@/hooks/usePushNotifications';
+import { usePushNotifications, isIOSDevice, isInstalledPWA } from '@/hooks/usePushNotifications';
 import { cn } from '@/lib/utils';
 import { ANIMATION_DURATION } from '@/constants';
 import type { Message } from '@/types/conversation';
@@ -85,6 +85,18 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
   const { conversations, mutate: mutateConversations } = useConversations();
   const { questions: followUpQuestions, fetchFollowUps, clearFollowUps, loadStoredFollowUps } = useFollowUp();
   const { permission, requestPermission, notify } = usePushNotifications();
+
+  // iOS requires PWA install for Web Push. Show guidance when needed.
+  // Initialize via lazy useState to read localStorage once on mount (avoids set-state-in-effect rule).
+  const [showIOSBanner, setShowIOSBanner] = useState(() => {
+    if (typeof window === 'undefined') return false;
+    const dismissed = localStorage.getItem('ios-notif-banner-dismissed');
+    return !dismissed && isIOSDevice() && !isInstalledPWA();
+  });
+  const dismissIOSBanner = useCallback(() => {
+    localStorage.setItem('ios-notif-banner-dismissed', '1');
+    setShowIOSBanner(false);
+  }, []);
 
   const uiInitialMessages = useMemo(
     () => dbMessagesToUIMessages(initialMessages),
@@ -254,21 +266,32 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
               </span>
             </div>
 
-            {/* Notification bell - always visible */}
+            {/* Notification bell - always visible, state reflects platform support */}
             <button
               onClick={async () => {
-                if (permission === 'unsupported') return;
+                if (permission === 'unsupported') {
+                  // Re-show the iOS install banner if dismissed
+                  if (isIOSDevice()) setShowIOSBanner(true);
+                  return;
+                }
                 if (permission === 'default') await requestPermission();
               }}
               disabled={permission === 'denied'}
+              aria-label={
+                permission === 'granted'
+                  ? 'Notifications enabled'
+                  : permission === 'denied'
+                  ? 'Notifications blocked'
+                  : 'Enable notifications'
+              }
               title={
                 permission === 'granted'
-                  ? 'Notifications on - tap to manage in browser settings'
+                  ? 'Notifications on'
                   : permission === 'denied'
-                  ? 'Notifications blocked - enable in browser settings'
+                  ? 'Blocked - enable in browser settings'
                   : permission === 'unsupported'
-                  ? 'Add to Home Screen to enable notifications'
-                  : 'Enable notifications'
+                  ? 'Tap for iOS notification setup'
+                  : 'Enable reply notifications'
               }
               className={cn(
                 'h-10 w-10 flex items-center justify-center rounded-xl transition-colors',
@@ -276,8 +299,6 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
                   ? 'text-sky-400 hover:bg-sky-500/10'
                   : permission === 'denied'
                   ? 'text-neutral-600 cursor-not-allowed'
-                  : permission === 'unsupported'
-                  ? 'text-neutral-600'
                   : 'text-neutral-400 hover:text-white hover:bg-white/6'
               )}
             >
@@ -305,6 +326,39 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
             </button>
           </div>
         </header>
+
+        {/* iOS PWA install banner */}
+        <AnimatePresence>
+          {showIOSBanner && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.25 }}
+              className="flex items-center gap-3 px-4 py-2.5 bg-sky-600/10 border-b border-sky-500/15 text-sm text-sky-300"
+            >
+              <svg className="h-4 w-4 flex-shrink-0 text-sky-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+              </svg>
+              <span className="flex-1 leading-snug">
+                To get reply notifications on iPhone: tap{' '}
+                <svg className="inline h-3.5 w-3.5 mb-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+                </svg>
+                {' '}Share then <strong>Add to Home Screen</strong>
+              </span>
+              <button
+                onClick={dismissIOSBanner}
+                className="h-7 w-7 flex-shrink-0 flex items-center justify-center rounded-lg text-sky-400/60 hover:text-sky-300 hover:bg-sky-500/10 transition-colors"
+                aria-label="Dismiss"
+              >
+                <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Messages */}
         <div className="flex-1 overflow-y-auto">
