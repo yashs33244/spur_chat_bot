@@ -29,7 +29,7 @@ export async function getPushSubscription(sessionId: string) {
 
 export async function scheduleFollowUp(sessionId: string) {
   const db = getDb();
-  const followupAt = new Date(Date.now() + 10 * 1000); // TEST: 10s, change back to 5 * 60 * 1000 after testing
+  const followupAt = new Date(Date.now() + 5 * 60 * 1000);
   await db
     .update(schema.conversations)
     .set({ followupScheduledAt: followupAt, followupSent: false })
