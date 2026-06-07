@@ -140,6 +140,77 @@ npm test
 
 Set all variables from `.env.local` as Vercel environment variables, then run migrations against the Neon connection string.
 
+### Web Push Notifications (VAPID)
+
+Generate keys once:
+
+```bash
+npx web-push generate-vapid-keys
+```
+
+Add to Vercel env vars:
+
+| Variable | Description |
+|---|---|
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | Public key (safe to expose - used by browser to subscribe) |
+| `VAPID_PRIVATE_KEY` | Private key (server only - signs every push) |
+| `VAPID_EMAIL` | Contact email required by the VAPID spec |
+| `CRON_SECRET` | Optional random string to protect the cron endpoint |
+
+Apply the push notifications migration:
+
+```bash
+psql $DATABASE_URL -f drizzle/0003_push_notifications.sql
+```
+
+The Vercel Cron job (`vercel.json`) hits `/api/push/followup` every minute and requires the Pro plan for sub-hourly schedules. On Hobby, upgrade or use an external cron (cron-job.org works free).
+
+## How Push Notifications Work
+
+```
+1. User sends first message (user gesture required by browsers)
+       |
+       v
+2. Browser shows "Allow notifications?" dialog
+       |
+       v
+3. If granted: browser creates a PushSubscription (encrypted endpoint)
+       |  Registered with VAPID public key -> tied to FCM (Android/Chrome)
+       |  or APNs (Safari/iOS PWA)
+       v
+4. App POSTs subscription + sessionId to /api/push/subscribe -> stored in DB
+       |
+       v
+5. AI responds -> /api/chat sets conversations.followup_scheduled_at = now + 5 min
+       |
+       v
+6. User closes tab (or switches away)
+       |
+       v
+7. Vercel Cron fires /api/push/followup every minute
+       |  Finds conversations past their followup_scheduled_at
+       |  Signs payload with VAPID private key
+       |  POSTs to FCM/APNs endpoint
+       v
+8. FCM/APNs delivers to device -> service worker (sw.js) wakes up
+       |  Shows OS notification: "Did we resolve your issue?"
+       v
+9. User taps notification -> browser opens tab at /{sessionId}
+```
+
+**If user sends another message before the 5-minute timer fires**, `cancelFollowUp()` resets the schedule. The follow-up only fires for conversations that went quiet.
+
+**Platform support:**
+
+| Platform | Notifications work? | Notes |
+|---|---|---|
+| Chrome / Firefox / Edge (desktop) | Yes | Browser must be installed |
+| Android Chrome | Yes | Works even with browser in background |
+| macOS Safari 16.1+ | Yes | |
+| iOS Safari (Add to Home Screen, iOS 16.4+) | Yes | Must be installed as PWA |
+| iOS Safari (browser tab) | No | Apple platform restriction |
+| iOS Chrome | No | Uses WebKit, same Apple restriction |
+
 ## Trade-offs and If I Had More Time
 
 ### Trade-offs Made
