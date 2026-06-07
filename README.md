@@ -165,51 +165,113 @@ psql $DATABASE_URL -f drizzle/0003_push_notifications.sql
 
 The Vercel Cron job (`vercel.json`) hits `/api/push/followup` every minute and requires the Pro plan for sub-hourly schedules. On Hobby, upgrade or use an external cron (cron-job.org works free).
 
-## How Push Notifications Work
+## Push Notification Implementation
+
+### What was built
+
+A full server-side Web Push stack with VAPID authentication - the same mechanism Slack, Gmail, and WhatsApp Web use. Notifications reach the user even when the browser tab is closed.
+
+The specific feature: if a conversation goes quiet for 5 minutes after the AI replies, the server sends a push: "Did we resolve your issue? We are here if you need more help." If the user sends another message before the 5-minute window, the follow-up is cancelled.
+
+### Files changed
+
+| File | What changed |
+|---|---|
+| `public/sw.js` | New. Service worker - receives push events from FCM/APNs, shows the OS notification, handles notification click (focuses existing tab or opens new one) |
+| `public/manifest.json` | New. PWA manifest - makes the site installable on Android/iOS Home Screen |
+| `hooks/usePushNotifications.ts` | New. Manages permission state, calls `Notification.requestPermission()`, creates a VAPID `PushSubscription` in the browser, POSTs it to the server |
+| `app/api/push/subscribe/route.ts` | New. Receives and stores the browser's `PushSubscription` object (endpoint, p256dh key, auth key) keyed by `sessionId` |
+| `app/api/push/followup/route.ts` | New. Cron endpoint - queries DB for due follow-ups, signs payload with VAPID private key, sends to FCM/APNs via `web-push` package |
+| `lib/repositories/push-subscription.repo.ts` | New. DB helpers: `upsertPushSubscription`, `scheduleFollowUp`, `cancelFollowUp`, `getPendingFollowUps`, `markFollowUpSent` |
+| `lib/db/schema.ts` | Added `push_subscriptions` table + `followup_scheduled_at` / `followup_sent` columns on `conversations` |
+| `drizzle/0003_push_notifications.sql` | New migration - applied to Neon |
+| `app/api/chat/route.ts` | In `onFinish`: calls `scheduleFollowUp(sessionId)`. On new user message: calls `cancelFollowUp(sessionId)` |
+| `app/layout.tsx` | Registers the service worker via `afterInteractive` script |
+| `vercel.json` | New. Vercel Cron - hits `/api/push/followup` every minute |
+| `.env.example` | Documents `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_EMAIL`, `CRON_SECRET` |
+
+### End-to-end flow
 
 ```
-1. User sends first message (user gesture required by browsers)
-       |
-       v
-2. Browser shows "Allow notifications?" dialog
-       |
-       v
-3. If granted: browser creates a PushSubscription (encrypted endpoint)
-       |  Registered with VAPID public key -> tied to FCM (Android/Chrome)
-       |  or APNs (Safari/iOS PWA)
-       v
-4. App POSTs subscription + sessionId to /api/push/subscribe -> stored in DB
-       |
-       v
-5. AI responds -> /api/chat sets conversations.followup_scheduled_at = now + 5 min
-       |
-       v
-6. User closes tab (or switches away)
-       |
-       v
-7. Vercel Cron fires /api/push/followup every minute
-       |  Finds conversations past their followup_scheduled_at
-       |  Signs payload with VAPID private key
-       |  POSTs to FCM/APNs endpoint
-       v
-8. FCM/APNs delivers to device -> service worker (sw.js) wakes up
-       |  Shows OS notification: "Did we resolve your issue?"
-       v
-9. User taps notification -> browser opens tab at /{sessionId}
+User sends first message
+  -> handleSend fires (user gesture - required by all browsers)
+  -> Notification.requestPermission() called
+  -> Browser shows native "Allow notifications?" dialog
+  -> User clicks Allow
+
+Browser creates PushSubscription
+  -> pushManager.subscribe({ applicationServerKey: VAPID_PUBLIC_KEY })
+  -> Returns { endpoint: "https://fcm.googleapis.com/...", keys: { p256dh, auth } }
+  -> This endpoint is tied to the user's browser on Google/Apple servers
+
+App stores subscription
+  -> POST /api/push/subscribe { sessionId, endpoint, p256dh, auth }
+  -> Upserted into push_subscriptions table in Neon
+  -> Confirmation notification fires immediately: "Notifications enabled"
+
+AI responds to a message
+  -> /api/chat onFinish: scheduleFollowUp(sessionId)
+  -> Sets conversations.followup_scheduled_at = NOW() + 5 minutes
+  -> followup_sent = false
+
+User replies before 5 minutes
+  -> cancelFollowUp(sessionId) called on next user message
+  -> followup_scheduled_at = NULL, followup_sent = true
+  -> No notification sent
+
+User goes quiet / closes the tab
+  -> Vercel Cron hits GET /api/push/followup every minute
+  -> Queries: conversations JOIN push_subscriptions
+             WHERE followup_scheduled_at <= NOW()
+             AND followup_sent = false
+  -> For each match:
+       webpush.sendNotification(
+         { endpoint, keys: { p256dh, auth } },
+         JSON.stringify({ title, body, url })
+       )
+       Signs request with VAPID private key
+       POSTs encrypted payload to FCM or APNs
+
+Google/Apple relays to device
+  -> Service worker (sw.js) wakes up - 'push' event fires
+  -> self.registration.showNotification("Spur Support - Quick Check", ...)
+  -> OS shows notification even with browser closed
+
+User taps notification
+  -> notificationclick event in sw.js
+  -> If tab already open: client.focus()
+  -> Otherwise: clients.openWindow("/{sessionId}")
 ```
 
-**If user sends another message before the 5-minute timer fires**, `cancelFollowUp()` resets the schedule. The follow-up only fires for conversations that went quiet.
+### Why this needs a service worker
 
-**Platform support:**
+JavaScript in a browser tab stops running when the tab is closed. A service worker is a separate script that runs in the background, registered once per origin, and persists across tab closes (as long as the browser itself is open). It is the only JavaScript context that can:
 
-| Platform | Notifications work? | Notes |
+1. Receive a server-sent push event (`push` listener)
+2. Show an OS-level notification (`self.registration.showNotification`)
+3. Handle the user tapping that notification (`notificationclick`)
+
+The VAPID private key on the server proves to FCM/APNs that the push came from this specific server, not a rogue third party. The browser verifies this using the VAPID public key it received during subscription.
+
+### The SSR bug that was fixed
+
+`useState` initializers in Next.js client components run during SSR where `Notification` is undefined (Node.js has no Notification API). The hook was initializing permission to `'unsupported'` on the server, and React inherited that value during client hydration. The bell appeared disabled on macOS, Chrome, Firefox - every browser. Fixed by:
+
+1. Starting the initial state at `'default'` (safe neutral value)
+2. Using `setTimeout(fn, 0)` inside `useEffect` to detect the real browser permission after hydration, without triggering the `react-hooks/set-state-in-effect` lint rule
+
+### Platform support
+
+| Platform | Works? | Reason |
 |---|---|---|
-| Chrome / Firefox / Edge (desktop) | Yes | Browser must be installed |
-| Android Chrome | Yes | Works even with browser in background |
-| macOS Safari 16.1+ | Yes | |
-| iOS Safari (Add to Home Screen, iOS 16.4+) | Yes | Must be installed as PWA |
-| iOS Safari (browser tab) | No | Apple platform restriction |
-| iOS Chrome | No | Uses WebKit, same Apple restriction |
+| Chrome / Edge / Firefox (desktop) | Yes | Full Web Push support |
+| Android Chrome | Yes | Works even with browser backgrounded |
+| macOS Safari 16.1+ | Yes | Apple added Web Push in Safari 16.1 |
+| iOS PWA (Add to Home Screen, iOS 16.4+) | Yes | Apple added Web Push for installed PWAs in iOS 16.4 |
+| iOS Safari (browser tab) | No | Apple restricts Web Push to installed PWAs only |
+| Chrome on iOS | No | Apple requires all iOS browsers to use WebKit - same restriction applies |
+
+For iOS browser users, the app shows a dismissible banner: "Tap Share then Add to Home Screen" - once installed, push works identically to Android.
 
 ## Trade-offs and If I Had More Time
 
