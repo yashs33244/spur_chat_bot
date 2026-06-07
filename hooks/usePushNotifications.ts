@@ -36,12 +36,24 @@ async function registerServerSubscription(sessionId: string) {
   try {
     const reg = await navigator.serviceWorker.ready;
     const existing = await reg.pushManager.getSubscription();
-    const sub =
-      existing ??
-      (await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
-      }));
+    const newKeyBytes = urlBase64ToUint8Array(vapidKey);
+
+    // If the existing subscription used a different VAPID key, drop it and re-subscribe.
+    // This happens after a key rotation - reusing the old sub silently fails at FCM delivery.
+    let needsResub = !existing;
+    if (existing) {
+      const existingKey = new Uint8Array(existing.options.applicationServerKey ?? new ArrayBuffer(0));
+      needsResub = existingKey.length !== newKeyBytes.length ||
+        existingKey.some((b, i) => b !== newKeyBytes[i]);
+      if (needsResub) await existing.unsubscribe();
+    }
+
+    const sub = needsResub
+      ? await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: newKeyBytes.buffer as ArrayBuffer,
+        })
+      : existing!;
 
     const json = sub.toJSON();
     if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) return;
