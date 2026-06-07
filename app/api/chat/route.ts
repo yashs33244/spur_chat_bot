@@ -85,18 +85,30 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Message too long' }, { status: 400 });
   }
 
-  if (detectInjection(userText)) {
-    return Response.json(
-      { error: "I can only assist with Spur-related questions." },
-      { status: 400 }
-    );
-  }
+  if (detectInjection(userText) || isOffTopic(userText)) {
+    const handoffText =
+      "I'm Spur's support assistant and can only help with questions about Spur's platform. " +
+      "For anything else, the Spur team is available at support@spurnow.com or you can book a demo at https://spurnow.com/demo. " +
+      "Is there something about Spur I can help you with?";
 
-  if (isOffTopic(userText)) {
-    return Response.json(
-      { error: "I can only assist with Spur-related questions." },
-      { status: 400 }
-    );
+    await persistMessage(sessionId, 'ai', handoffText).catch(() => {});
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        // AI SDK v6 UI message stream format
+        controller.enqueue(encoder.encode(`0:${JSON.stringify(handoffText)}\n`));
+        controller.enqueue(encoder.encode(`d:${JSON.stringify({ finishReason: 'stop', usage: { promptTokens: 0, completionTokens: 0 } })}\n`));
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'x-vercel-ai-data-stream': 'v1',
+      },
+    });
   }
 
   let isFirstMessage = false;
