@@ -139,23 +139,26 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
     (e: React.FormEvent) => {
       e.preventDefault();
       if (!input.trim() || isLoading) return;
+      // Auto-request notification permission on first send - user gesture guarantees it works
+      if (permission === 'default') requestPermission().catch(() => {});
       dispatch({ type: 'SET_LAST_USER_MSG', msg: input });
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       clearFollowUps();
       sendMessage({ text: input });
       setInput('');
     },
-    [input, isLoading, sendMessage, clearFollowUps]
+    [input, isLoading, sendMessage, clearFollowUps, permission, requestPermission]
   );
 
   const handleFollowUpSelect = useCallback(
     (question: string) => {
+      if (permission === 'default') requestPermission().catch(() => {});
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       dispatch({ type: 'SET_LAST_USER_MSG', msg: question });
       clearFollowUps();
       sendMessage({ text: question });
     },
-    [sendMessage, clearFollowUps]
+    [sendMessage, clearFollowUps, permission, requestPermission]
   );
 
   const handleDeleteConversation = useCallback(
@@ -251,40 +254,43 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
               </span>
             </div>
 
-            {/* Notification bell */}
-            {permission !== 'unsupported' && (
-              <button
-                onClick={async () => {
-                  if (permission === 'default') await requestPermission();
-                }}
-                disabled={permission === 'denied'}
-                title={
-                  permission === 'granted'
-                    ? 'Notifications enabled'
-                    : permission === 'denied'
-                    ? 'Notifications blocked - check browser settings'
-                    : 'Enable notifications'
-                }
-                className={cn(
-                  'h-10 w-10 flex items-center justify-center rounded-xl transition-colors',
-                  permission === 'granted'
-                    ? 'text-sky-400 hover:bg-sky-500/10'
-                    : permission === 'denied'
-                    ? 'text-neutral-600 cursor-not-allowed'
-                    : 'text-neutral-400 hover:text-white hover:bg-white/6'
-                )}
-              >
-                {permission === 'granted' ? (
-                  <svg className="h-4.5 w-4.5" fill="currentColor" viewBox="0 0 24 24">
-                    <path d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.057 2.118 5.52a.75.75 0 0 1-.297 1.206c-1.544.57-3.16.99-4.831 1.243a3.75 3.75 0 1 1-7.48 0 24.585 24.585 0 0 1-4.831-1.244.75.75 0 0 1-.298-1.205A8.217 8.217 0 0 0 5.25 9.75V9Z" />
-                  </svg>
-                ) : (
-                  <svg className="h-4.5 w-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
-                  </svg>
-                )}
-              </button>
-            )}
+            {/* Notification bell - always visible */}
+            <button
+              onClick={async () => {
+                if (permission === 'unsupported') return;
+                if (permission === 'default') await requestPermission();
+              }}
+              disabled={permission === 'denied'}
+              title={
+                permission === 'granted'
+                  ? 'Notifications on - tap to manage in browser settings'
+                  : permission === 'denied'
+                  ? 'Notifications blocked - enable in browser settings'
+                  : permission === 'unsupported'
+                  ? 'Add to Home Screen to enable notifications'
+                  : 'Enable notifications'
+              }
+              className={cn(
+                'h-10 w-10 flex items-center justify-center rounded-xl transition-colors',
+                permission === 'granted'
+                  ? 'text-sky-400 hover:bg-sky-500/10'
+                  : permission === 'denied'
+                  ? 'text-neutral-600 cursor-not-allowed'
+                  : permission === 'unsupported'
+                  ? 'text-neutral-600'
+                  : 'text-neutral-400 hover:text-white hover:bg-white/6'
+              )}
+            >
+              {permission === 'granted' ? (
+                <svg className="h-[18px] w-[18px]" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M5.25 9a6.75 6.75 0 0 1 13.5 0v.75c0 2.123.8 4.057 2.118 5.52a.75.75 0 0 1-.297 1.206c-1.544.57-3.16.99-4.831 1.243a3.75 3.75 0 1 1-7.48 0 24.585 24.585 0 0 1-4.831-1.244.75.75 0 0 1-.298-1.205A8.217 8.217 0 0 0 5.25 9.75V9Z" />
+                </svg>
+              ) : (
+                <svg className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+                </svg>
+              )}
+            </button>
 
             {/* New chat */}
             <button
