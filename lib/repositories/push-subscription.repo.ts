@@ -12,8 +12,8 @@ export async function upsertPushSubscription(
     .insert(schema.pushSubscriptions)
     .values({ sessionId, endpoint, p256dh, auth })
     .onConflictDoUpdate({
-      target: schema.pushSubscriptions.sessionId,
-      set: { endpoint, p256dh, auth },
+      target: [schema.pushSubscriptions.sessionId, schema.pushSubscriptions.endpoint],
+      set: { p256dh, auth },
     });
 }
 
