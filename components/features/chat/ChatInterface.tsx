@@ -151,8 +151,9 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
     (e: React.FormEvent) => {
       e.preventDefault();
       if (!input.trim() || isLoading) return;
-      // Auto-request notification permission on first send - user gesture guarantees it works
-      if (permission === 'default') requestPermission(sessionId).catch(() => {});
+      // Request permission on first send (default), or silently re-register subscription
+      // for returning users whose permission is already granted but have a new session ID
+      if (permission === 'default' || permission === 'granted') requestPermission(sessionId).catch(() => {});
       dispatch({ type: 'SET_LAST_USER_MSG', msg: input });
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       clearFollowUps();
@@ -164,7 +165,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
 
   const handleFollowUpSelect = useCallback(
     (question: string) => {
-      if (permission === 'default') requestPermission(sessionId).catch(() => {});
+      if (permission === 'default' || permission === 'granted') requestPermission(sessionId).catch(() => {});
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       dispatch({ type: 'SET_LAST_USER_MSG', msg: question });
       clearFollowUps();

@@ -106,20 +106,28 @@ export function usePushNotifications() {
     return () => { clearTimeout(t); clearInterval(id); };
   }, []);
 
-  // requestPermission also registers the VAPID subscription if sessionId is provided
+  // requestPermission registers the VAPID subscription.
+  // If permission is already granted (returning user), silently re-registers
+  // without showing the browser prompt - so every new session gets a subscription.
   const requestPermission = useCallback(
     async (sessionId?: string): Promise<NotifPermission> => {
       if (typeof Notification === 'undefined') return 'unsupported';
+
+      // Already granted - no dialog needed, just ensure subscription is live
+      if (Notification.permission === 'granted') {
+        setPermission('granted');
+        if (sessionId) await registerServerSubscription(sessionId);
+        return 'granted';
+      }
+
       const result = await Notification.requestPermission();
       setPermission(result as NotifPermission);
 
       if (result === 'granted') {
-        // Confirm it works with a test notification
         await fireNotification(
           'Spur Support',
           "Notifications enabled - you'll be notified when we reply"
         );
-        // Register VAPID subscription for server-side push (follow-ups)
         if (sessionId) await registerServerSubscription(sessionId);
       }
 
