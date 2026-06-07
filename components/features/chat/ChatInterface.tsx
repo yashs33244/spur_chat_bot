@@ -84,7 +84,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
 
   const { conversations, mutate: mutateConversations } = useConversations();
   const { questions: followUpQuestions, fetchFollowUps, clearFollowUps, loadStoredFollowUps } = useFollowUp();
-  const { permission, requestPermission, notify } = usePushNotifications();
+  const { permission, requestPermission, notify, inAppToast, dismissToast } = usePushNotifications();
 
   // iOS requires PWA install for Web Push. Show guidance when needed.
   // Initialize via lazy useState to read localStorage once on mount (avoids set-state-in-effect rule).
@@ -206,6 +206,27 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
 
   return (
     <div className="flex h-svh bg-[#080c14] text-white overflow-hidden">
+      {/* In-app toast for push notifications received while tab is focused */}
+      <AnimatePresence>
+        {inAppToast && (
+          <motion.div
+            initial={{ opacity: 0, y: -20 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            transition={{ duration: 0.25 }}
+            className="fixed top-4 right-4 z-50 flex items-start gap-3 bg-[#1a2236] border border-[#2a3a5c] rounded-xl px-4 py-3 shadow-xl max-w-sm cursor-pointer"
+            onClick={() => { dismissToast(); router.push(inAppToast.url); }}
+          >
+            <img src="/icon-192.png" alt="" className="w-8 h-8 rounded-lg shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-white truncate">{inAppToast.title}</p>
+              <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{inAppToast.body}</p>
+            </div>
+            <button onClick={(e) => { e.stopPropagation(); dismissToast(); }} className="text-gray-500 hover:text-white ml-1 shrink-0 text-lg leading-none">x</button>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <SessionSidebar
         isOpen={state.sidebarOpen}
         conversations={conversations}

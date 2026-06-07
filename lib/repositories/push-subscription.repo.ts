@@ -1,5 +1,5 @@
 import { getDb, schema } from '@/lib/db';
-import { eq, and, lte, isNotNull } from 'drizzle-orm';
+import { eq, and, lte, gte, isNotNull } from 'drizzle-orm';
 
 export async function upsertPushSubscription(
   sessionId: string,
@@ -63,7 +63,9 @@ export async function getPendingFollowUps() {
       and(
         isNotNull(schema.conversations.followupScheduledAt),
         lte(schema.conversations.followupScheduledAt, now),
-        eq(schema.conversations.followupSent, false)
+        eq(schema.conversations.followupSent, false),
+        // Stop pushing for sessions older than 24 hours - prevents stale sessions from spamming
+        gte(schema.conversations.createdAt, new Date(Date.now() - 24 * 60 * 60 * 1000))
       )
     )
     .limit(50);

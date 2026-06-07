@@ -85,8 +85,11 @@ async function fireNotification(title: string, body: string, url?: string) {
   setTimeout(() => n.close(), 6000);
 }
 
+export type InAppToast = { title: string; body: string; url: string } | null;
+
 export function usePushNotifications() {
   const [permission, setPermission] = useState<NotifPermission>('default');
+  const [inAppToast, setInAppToast] = useState<InAppToast>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -104,6 +107,20 @@ export function usePushNotifications() {
     }, 4000);
 
     return () => { clearTimeout(t); clearInterval(id); };
+  }, []);
+
+  // Listen for PUSH_RECEIVED messages from the service worker.
+  // Shows an in-app toast when the tab is focused (Chrome suppresses OS banners in that case).
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return;
+    const handler = (event: MessageEvent) => {
+      if (event.data?.type !== 'PUSH_RECEIVED') return;
+      const { title, body, url } = event.data.data ?? {};
+      setInAppToast({ title: title ?? 'Spur Support', body: body ?? '', url: url ?? '/' });
+      setTimeout(() => setInAppToast(null), 8000);
+    };
+    navigator.serviceWorker.addEventListener('message', handler);
+    return () => navigator.serviceWorker.removeEventListener('message', handler);
   }, []);
 
   // requestPermission registers the VAPID subscription.
@@ -143,5 +160,5 @@ export function usePushNotifications() {
     await fireNotification(title, body, url);
   }, []);
 
-  return { permission, requestPermission, notify };
+  return { permission, requestPermission, notify, inAppToast, dismissToast: () => setInAppToast(null) };
 }
