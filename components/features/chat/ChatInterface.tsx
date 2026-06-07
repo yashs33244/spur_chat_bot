@@ -354,7 +354,7 @@ function WelcomeScreen({ onSuggestionClick }: { onSuggestionClick: (q: string) =
       </div>
       <h1 className="text-xl font-semibold text-white mb-2">Spur Support</h1>
       <p className="text-sm text-neutral-400 mb-8 max-w-sm">
-        Ask me anything about Spur's features, integrations, pricing, or getting started.
+        Ask me anything about Spur&apos;s features, integrations, pricing, or getting started.
       </p>
       <div className="flex flex-wrap gap-2 justify-center max-w-md">
         {suggestions.map((s) => (

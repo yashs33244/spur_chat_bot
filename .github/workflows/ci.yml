@@ -18,6 +18,14 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run build
+    env:
+      LLM_PROVIDER: gemini
+      LLM_MODEL: gemini-2.0-flash-lite
+      LLM_API_KEY: placeholder-for-build
+      DATABASE_URL: postgresql://spur:spurdev@localhost:5432/spurdb
+      MAX_CONTEXT_MESSAGES: '20'
+      MAX_MESSAGE_LENGTH: '2000'
+      RATE_LIMIT_RPM: '20'
 
   lint:
     name: Lint
@@ -29,4 +37,16 @@ jobs:
           node-version: '22'
           cache: 'npm'
       - run: npm ci
-      - run: npx eslint . --max-warnings 0
+      - run: ./node_modules/.bin/eslint . --max-warnings 0
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test

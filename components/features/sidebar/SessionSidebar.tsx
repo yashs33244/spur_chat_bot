@@ -3,8 +3,6 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import { ConversationItem } from './ConversationItem';
 import { Button } from '@/components/ui/Button';
-import { formatDate } from '@/lib/utils';
-import { cn } from '@/lib/utils';
 import { SIDEBAR_WIDTH } from '@/constants';
 import type { Conversation } from '@/types/conversation';
 

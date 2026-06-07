@@ -24,19 +24,21 @@ export function ConversationItem({
   const [isSaving, setIsSaving] = useState(false);
   const [optimisticName, setOptimisticName] = useState<string | null>(null);
   const [editValue, setEditValue] = useState(conversation.name ?? 'New conversation');
+  // Track last synced name to detect server-side updates without a useEffect
+  const [syncedName, setSyncedName] = useState(conversation.name);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isEditing) inputRef.current?.focus();
   }, [isEditing]);
 
-  // Keep edit value in sync when conversation name updates from server
-  useEffect(() => {
-    if (!isEditing && !isSaving) {
-      setEditValue(conversation.name ?? 'New conversation');
-      setOptimisticName(null);
-    }
-  }, [conversation.name, isEditing, isSaving]);
+  // Derived state sync: when server updates conversation.name and we are not editing,
+  // update editValue inline during render (React-recommended pattern over setState-in-effect).
+  if (!isEditing && !isSaving && syncedName !== conversation.name) {
+    setSyncedName(conversation.name);
+    setEditValue(conversation.name ?? 'New conversation');
+    setOptimisticName(null);
+  }
 
   const commitRename = async () => {
     const trimmed = editValue.trim();
