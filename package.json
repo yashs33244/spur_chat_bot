@@ -15,6 +15,7 @@
     "@ai-sdk/openai": "^3.0.68",
     "@ai-sdk/react": "^3.0.199",
     "@tailwindcss/typography": "^0.5.19",
+    "@types/web-push": "^3.6.4",
     "ai": "^6.0.197",
     "clsx": "^2.1.1",
     "drizzle-orm": "^0.45.2",
@@ -29,6 +30,7 @@
     "swr": "^2.4.1",
     "tailwind-merge": "^3.6.0",
     "uuid": "^14.0.0",
+    "web-push": "^3.6.7",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -12,6 +12,7 @@ import {
   updateConversationName,
 } from '@/lib/repositories/conversation.repo';
 import { persistMessage, countMessages } from '@/lib/repositories/message.repo';
+import { scheduleFollowUp, cancelFollowUp } from '@/lib/repositories/push-subscription.repo';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -123,6 +124,8 @@ export async function POST(req: NextRequest) {
   }
 
   await persistMessage(sessionId, 'user', userText);
+  // Cancel any pending follow-up - user is actively chatting
+  cancelFollowUp(sessionId).catch(() => {});
 
   if (isFirstMessage) {
     const nameModel = createLLMModel();
@@ -155,6 +158,9 @@ export async function POST(req: NextRequest) {
     messages: modelMessages,
     onFinish: async ({ text }) => {
       await persistMessage(sessionId, 'ai', text);
+      // Schedule a follow-up push in 5 minutes. If the user sends another
+      // message before then, cancelFollowUp() above will reset it.
+      scheduleFollowUp(sessionId).catch(() => {});
     },
   });
 

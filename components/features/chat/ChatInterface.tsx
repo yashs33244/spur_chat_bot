@@ -152,25 +152,25 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
       e.preventDefault();
       if (!input.trim() || isLoading) return;
       // Auto-request notification permission on first send - user gesture guarantees it works
-      if (permission === 'default') requestPermission().catch(() => {});
+      if (permission === 'default') requestPermission(sessionId).catch(() => {});
       dispatch({ type: 'SET_LAST_USER_MSG', msg: input });
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       clearFollowUps();
       sendMessage({ text: input });
       setInput('');
     },
-    [input, isLoading, sendMessage, clearFollowUps, permission, requestPermission]
+    [input, isLoading, sendMessage, clearFollowUps, permission, requestPermission, sessionId]
   );
 
   const handleFollowUpSelect = useCallback(
     (question: string) => {
-      if (permission === 'default') requestPermission().catch(() => {});
+      if (permission === 'default') requestPermission(sessionId).catch(() => {});
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       dispatch({ type: 'SET_LAST_USER_MSG', msg: question });
       clearFollowUps();
       sendMessage({ text: question });
     },
-    [sendMessage, clearFollowUps, permission, requestPermission]
+    [sendMessage, clearFollowUps, permission, requestPermission, sessionId]
   );
 
   const handleDeleteConversation = useCallback(
@@ -274,7 +274,7 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
                   if (isIOSDevice()) setShowIOSBanner(true);
                   return;
                 }
-                if (permission === 'default') await requestPermission();
+                if (permission === 'default') await requestPermission(sessionId);
               }}
               disabled={permission === 'denied'}
               aria-label={
