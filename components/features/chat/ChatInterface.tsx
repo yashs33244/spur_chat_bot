@@ -15,7 +15,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { useConversations } from '@/hooks/useConversations';
 import { useFollowUp } from '@/hooks/useFollowUp';
-import { usePushNotifications, isIOSDevice, isInstalledPWA } from '@/hooks/usePushNotifications';
+import { usePushNotifications, isIOSDevice, isInstalledPWA, getDeviceId } from '@/hooks/usePushNotifications';
 import { cn } from '@/lib/utils';
 import { ANIMATION_DURATION } from '@/constants';
 import type { Message } from '@/types/conversation';
@@ -72,6 +72,8 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const [sessionId] = useState<string>(() => initialSessionId ?? uuidv4());
+  // Stable device identity - persisted in localStorage across all sessions on this device
+  const [deviceId] = useState<string>(() => (typeof window !== 'undefined' ? getDeviceId() : ''));
   const [input, setInput] = useState('');
 
   const [state, dispatch] = useReducer(reducer, {
@@ -105,8 +107,8 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
   );
 
   const transport = useMemo(
-    () => new DefaultChatTransport({ api: '/api/chat', body: { sessionId } }),
-    [sessionId]
+    () => new DefaultChatTransport({ api: '/api/chat', body: { sessionId, deviceId } }),
+    [sessionId, deviceId]
   );
 
   const { messages, sendMessage, status, setMessages, error, clearError, stop } = useChat({
@@ -153,25 +155,25 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
       if (!input.trim() || isLoading) return;
       // Request permission on first send (default), or silently re-register subscription
       // for returning users whose permission is already granted but have a new session ID
-      if (permission === 'default' || permission === 'granted') requestPermission(sessionId).catch(() => {});
+      if (permission === 'default' || permission === 'granted') requestPermission(deviceId, sessionId).catch(() => {});
       dispatch({ type: 'SET_LAST_USER_MSG', msg: input });
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       clearFollowUps();
       sendMessage({ text: input });
       setInput('');
     },
-    [input, isLoading, sendMessage, clearFollowUps, permission, requestPermission, sessionId]
+    [input, isLoading, sendMessage, clearFollowUps, permission, requestPermission, sessionId, deviceId]
   );
 
   const handleFollowUpSelect = useCallback(
     (question: string) => {
-      if (permission === 'default' || permission === 'granted') requestPermission(sessionId).catch(() => {});
+      if (permission === 'default' || permission === 'granted') requestPermission(deviceId, sessionId).catch(() => {});
       dispatch({ type: 'HIDE_FOLLOW_UPS' });
       dispatch({ type: 'SET_LAST_USER_MSG', msg: question });
       clearFollowUps();
       sendMessage({ text: question });
     },
-    [sendMessage, clearFollowUps, permission, requestPermission, sessionId]
+    [sendMessage, clearFollowUps, permission, requestPermission, sessionId, deviceId]
   );
 
   const handleDeleteConversation = useCallback(

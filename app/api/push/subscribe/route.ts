@@ -5,6 +5,7 @@ import { upsertPushSubscription } from '@/lib/repositories/push-subscription.rep
 export const runtime = 'nodejs';
 
 const bodySchema = z.object({
+  deviceId: z.string().min(1),
   sessionId: z.string().uuid(),
   endpoint: z.string().url(),
   p256dh: z.string().min(1),
@@ -24,21 +25,21 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'Invalid subscription data' }, { status: 400 });
   }
 
-  const { sessionId, endpoint, p256dh, auth } = parsed.data;
-  await upsertPushSubscription(sessionId, endpoint, p256dh, auth);
+  const { deviceId, sessionId, endpoint, p256dh, auth } = parsed.data;
+  await upsertPushSubscription(deviceId, sessionId, endpoint, p256dh, auth);
 
   return Response.json({ ok: true });
 }
 
 export async function DELETE(req: NextRequest) {
   const { searchParams } = new URL(req.url);
-  const sessionId = searchParams.get('sessionId');
-  if (!sessionId) return Response.json({ error: 'Missing sessionId' }, { status: 400 });
+  const deviceId = searchParams.get('deviceId');
+  if (!deviceId) return Response.json({ error: 'Missing deviceId' }, { status: 400 });
 
   const { getDb, schema } = await import('@/lib/db');
   const { eq } = await import('drizzle-orm');
   const db = getDb();
-  await db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.sessionId, sessionId));
+  await db.delete(schema.pushSubscriptions).where(eq(schema.pushSubscriptions.deviceId, deviceId));
 
   return Response.json({ ok: true });
 }

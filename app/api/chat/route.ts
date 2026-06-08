@@ -31,6 +31,7 @@ const uiMessageSchema = z.object({
 const bodySchema = z.object({
   messages: z.array(uiMessageSchema).min(1),
   sessionId: z.string().uuid(),
+  deviceId: z.string().min(1).optional(),
   id: z.string().optional(),
   trigger: z.string().optional(),
   messageId: z.string().optional(),
@@ -69,7 +70,7 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: parsed.error.issues[0]?.message ?? 'Invalid request' }, { status: 400 });
   }
 
-  const { messages, sessionId } = parsed.data;
+  const { messages, sessionId, deviceId = '' } = parsed.data;
 
   const lastUserMessage = [...messages].reverse().find((m) => m.role === 'user');
   if (!lastUserMessage) {
@@ -160,7 +161,7 @@ export async function POST(req: NextRequest) {
       await persistMessage(sessionId, 'ai', text);
       // Schedule a follow-up push in 5 minutes. If the user sends another
       // message before then, cancelFollowUp() above will reset it.
-      scheduleFollowUp(sessionId).catch(() => {});
+      scheduleFollowUp(sessionId, deviceId).catch(() => {});
     },
   });
 

@@ -20,6 +20,19 @@ export function isInstalledPWA(): boolean {
   );
 }
 
+// Stable identity for this physical device. Generated once and persisted in localStorage.
+// Survives page navigations and session changes. Used to link push subscriptions to devices.
+export function getDeviceId(): string {
+  if (typeof window === 'undefined') return '';
+  const key = 'spur_device_id';
+  let id = localStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+  }
+  return id;
+}
+
 function urlBase64ToUint8Array(base64String: string): Uint8Array {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -28,18 +41,19 @@ function urlBase64ToUint8Array(base64String: string): Uint8Array {
 }
 
 // Register a VAPID push subscription and POST it to the server.
-// No-ops gracefully if VAPID public key is not configured.
-async function registerServerSubscription(sessionId: string) {
+// Sends both deviceId (stable per device) and sessionId (current chat session).
+// Only called from message-send paths where a conversation is guaranteed to exist.
+async function registerServerSubscription(deviceId: string, sessionId: string) {
   const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  if (!vapidKey || !('serviceWorker' in navigator)) return;
+  if (!vapidKey || !('serviceWorker' in navigator) || !deviceId || !sessionId) return;
 
   try {
     const reg = await navigator.serviceWorker.ready;
     const existing = await reg.pushManager.getSubscription();
     const newKeyBytes = urlBase64ToUint8Array(vapidKey);
 
-    // If the existing subscription used a different VAPID key, drop it and re-subscribe.
-    // This happens after a key rotation - reusing the old sub silently fails at FCM delivery.
+    // Detect VAPID key rotation: the old sub's key won't match the current key.
+    // FCM silently drops pushes when keys mismatch, so force a re-subscribe.
     let needsResub = !existing;
     if (existing) {
       const existingKey = new Uint8Array(existing.options.applicationServerKey ?? new ArrayBuffer(0));
@@ -63,6 +77,7 @@ async function registerServerSubscription(sessionId: string) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        deviceId,
         sessionId,
         endpoint: json.endpoint,
         p256dh: json.keys.p256dh,
@@ -136,16 +151,16 @@ export function usePushNotifications() {
     return () => navigator.serviceWorker.removeEventListener('message', handler);
   }, []);
 
-  // requestPermission shows the browser dialog for new users, then registers the subscription.
-  // Pass a sessionId ONLY when a conversation is guaranteed to exist (i.e. on message send).
-  // Calling without a sessionId just shows the permission dialog - no server subscription saved.
+  // requestPermission - shows browser dialog for new users.
+  // Pass BOTH deviceId and sessionId when called from a message-send path (conversation exists).
+  // Call with no args from the bell button - only shows the dialog, no server subscription saved.
   const requestPermission = useCallback(
-    async (sid?: string): Promise<NotifPermission> => {
+    async (deviceId?: string, sessionId?: string): Promise<NotifPermission> => {
       if (typeof Notification === 'undefined') return 'unsupported';
 
       if (Notification.permission === 'granted') {
         setPermission('granted');
-        if (sid) await registerServerSubscription(sid);
+        if (deviceId && sessionId) await registerServerSubscription(deviceId, sessionId);
         return 'granted';
       }
 
@@ -157,7 +172,7 @@ export function usePushNotifications() {
           'Spur Support',
           "Notifications enabled - you'll be notified when we reply"
         );
-        if (sid) await registerServerSubscription(sid);
+        if (deviceId && sessionId) await registerServerSubscription(deviceId, sessionId);
       }
 
       return result as NotifPermission;
