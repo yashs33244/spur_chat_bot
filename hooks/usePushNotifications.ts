@@ -43,7 +43,8 @@ async function registerServerSubscription(sessionId: string) {
     let needsResub = !existing;
     if (existing) {
       const existingKey = new Uint8Array(existing.options.applicationServerKey ?? new ArrayBuffer(0));
-      needsResub = existingKey.length !== newKeyBytes.length ||
+      needsResub =
+        existingKey.length !== newKeyBytes.length ||
         existingKey.some((b, i) => b !== newKeyBytes[i]);
       if (needsResub) await existing.unsubscribe();
     }
@@ -135,17 +136,16 @@ export function usePushNotifications() {
     return () => navigator.serviceWorker.removeEventListener('message', handler);
   }, []);
 
-  // requestPermission registers the VAPID subscription.
-  // If permission is already granted (returning user), silently re-registers
-  // without showing the browser prompt - so every new session gets a subscription.
+  // requestPermission shows the browser dialog for new users, then registers the subscription.
+  // Pass a sessionId ONLY when a conversation is guaranteed to exist (i.e. on message send).
+  // Calling without a sessionId just shows the permission dialog - no server subscription saved.
   const requestPermission = useCallback(
-    async (sessionId?: string): Promise<NotifPermission> => {
+    async (sid?: string): Promise<NotifPermission> => {
       if (typeof Notification === 'undefined') return 'unsupported';
 
-      // Already granted - no dialog needed, just ensure subscription is live
       if (Notification.permission === 'granted') {
         setPermission('granted');
-        if (sessionId) await registerServerSubscription(sessionId);
+        if (sid) await registerServerSubscription(sid);
         return 'granted';
       }
 
@@ -157,7 +157,7 @@ export function usePushNotifications() {
           'Spur Support',
           "Notifications enabled - you'll be notified when we reply"
         );
-        if (sessionId) await registerServerSubscription(sessionId);
+        if (sid) await registerServerSubscription(sid);
       }
 
       return result as NotifPermission;

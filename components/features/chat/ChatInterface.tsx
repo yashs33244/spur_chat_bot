@@ -296,7 +296,9 @@ export function ChatInterface({ initialSessionId, initialMessages = [] }: ChatIn
                   if (isIOSDevice()) setShowIOSBanner(true);
                   return;
                 }
-                if (permission === 'default') await requestPermission(sessionId);
+                // Only request browser permission here. The server subscription is
+                // registered in handleSend/handleFollowUpSelect where a conversation is guaranteed.
+                if (permission === 'default') await requestPermission();
               }}
               disabled={permission === 'denied'}
               aria-label={
